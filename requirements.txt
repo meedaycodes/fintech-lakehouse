@@ -1,0 +1,18 @@
+# Compute engine
+pyspark==3.5.3
+
+# Storage layer -ACID transactions, schema enforcement/evolution time travel on top of spark
+delta-spark==3.2.0
+
+# Unity Catalog REST client (catalog admin - no Spark SQL DDL for this)
+requests
+pyyaml
+
+faker
+mlflow>=2.16.1
+scikit-learn
+pandas
+pyarrow
+matplotlib
+pytest
+streamlit

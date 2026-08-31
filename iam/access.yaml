@@ -1,0 +1,31 @@
+# Declarative access model for the chip_lakehouse Unity Catalog.
+#
+# Applied by src/manage_access.py:
+#   python src/manage_access.py            # plan only, changes nothing
+#   python src/manage_access.py --apply    # reconcile the live server to match this file
+#
+# Reconciliation is full (add AND remove), but only within the guardrails
+# documented in manage_access.py: it only ever touches the principals
+# listed below, and only ever adds/removes privileges from a fixed
+# managed set. It never touches OWNER, never touches any principal not
+# listed here (e.g. the admin service account), and never deletes users.
+
+catalog: chip_lakehouse
+
+users:
+  - email: data-engineer@chip-lakehouse.local
+    name: Data Engineer
+    catalog_privileges: [USE CATALOG]
+    schema_privileges:
+      bronze: [USE SCHEMA, CREATE TABLE, SELECT, MODIFY]
+      silver: [USE SCHEMA, CREATE TABLE, SELECT, MODIFY]
+      gold: [USE SCHEMA, CREATE TABLE, SELECT, MODIFY]
+      ml: [USE SCHEMA, CREATE TABLE, SELECT, MODIFY]
+
+  - email: data-analyst@chip-lakehouse.local
+    name: Data Analyst
+    catalog_privileges: [USE CATALOG]
+    schema_privileges:
+      # No bronze entry on purpose - analysts get no access to raw bronze data.
+      silver: [USE SCHEMA, SELECT]
+      gold: [USE SCHEMA, SELECT]

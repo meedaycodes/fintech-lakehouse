@@ -1,0 +1,10 @@
+server.env=dev
+server.authorization=enable
+server.authorization-url=https://accounts.google.com/o/oauth2/auth
+server.token-url=https://oauth2.googleapis.com/token
+server.client-id=<your-google-oauth-client-id>.apps.googleusercontent.com
+server.client-secret=<your-google-oauth-client-secret>
+server.allowed-issuers=https://accounts.google.com
+server.audiences=<your-google-oauth-client-id>.apps.googleusercontent.com
+server.cookie-timeout=P5D
+server.access-token-timeout=PT24H

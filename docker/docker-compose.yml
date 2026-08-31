@@ -1,0 +1,22 @@
+services:
+    server:
+        image: unitycatalog/unitycatalog:latest
+        ports:
+            - "8080:8080"
+        volumes:
+            # The server's cwd is /home/unitycatalog and it loads config from the
+            # relative path etc/conf/server.properties - NOT /opt/unitycatalog.
+            # Mount only this one file so the image's other baked-in conf files
+            # (log4j2 properties, hibernate.properties, generated signing keys)
+            # stay in place.
+            - ./etc/conf/server.properties:/home/unitycatalog/etc/conf/server.properties
+            # Admin PAT the server (re)generates on every boot - mirrored to the
+            # host so `cat etc/conf/token.txt` works without docker exec.
+            - ./etc/conf/token.txt:/home/unitycatalog/etc/conf/token.txt
+            # Metadata (catalogs/schemas/tables) lives in the H2 db here.
+            - unitycatalog_db:/home/unitycatalog/etc/db
+            # Managed/external table data files live here.
+            - unitycatalog_data:/home/unitycatalog/etc/data
+volumes:
+    unitycatalog_db:
+    unitycatalog_data:

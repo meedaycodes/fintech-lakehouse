@@ -1,0 +1,29 @@
+# Python virtual environment
+finenv/
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Local Unity Catalog secrets - contains real OAuth client-id/secret and is
+# (re)generated per-boot. Copy server.properties.example to get started.
+docker/etc/conf/server.properties
+docker/etc/conf/token.txt
+
+# Generated data (regenerate via data_gen/generate_data.py)
+data/raw/*
+!data/raw/.gitkeep
+
+# Terraform
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+
+# OS / editor cruft
+.DS_Store
+.vscode/
+.idea/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
