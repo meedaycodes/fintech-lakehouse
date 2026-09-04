@@ -44,6 +44,10 @@ def get_spark(app_name = "chip-lakehouse"):
         SparkSession.builder.appName(app_name)
         .config("spark.jars.packages", "io.delta:delta-spark_2.12:3.2.0,io.unitycatalog:unitycatalog-spark_2.12:0.2.1")
         .config("spark.sql.extensions","io.delta.sql.DeltaSparkSessionExtension")
+        # Required for any Delta write, even a plain path-based .save() that
+        # never touches the UC catalog - Delta checks that the *session*
+        # catalog is Delta-aware regardless of which catalog you're using.
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         # UCSingleCatalog treats the Spark catalog config name as the UC
         # catalog name, so this must match CATALOG_NAME exactly.
         .config(f"spark.sql.catalog.{CATALOG_NAME}", "io.unitycatalog.spark.UCSingleCatalog")
