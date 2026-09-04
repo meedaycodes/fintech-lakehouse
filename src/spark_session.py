@@ -8,6 +8,12 @@ CATALOG_NAME = "chip_lakehouse"
 # The UC docker container (re)generates this admin PAT on every boot and
 # mirrors it to the host - see docker/docker-compose.yml.
 UC_TOKEN_FILE = Path(__file__).resolve().parent.parent / "docker" / "etc" / "conf" / "token.txt"
+# Every table this project writes goes through uc_delta.py to an explicit
+# path under data/lakehouse/ - nothing ever uses Spark's own default
+# managed-table location. Pointed here anyway so Spark stops scattering an
+# unused spark-warehouse/ directory into wherever a script happens to be
+# launched from.
+SPARK_WAREHOUSE_DIR = Path(__file__).resolve().parent.parent / "data" / "spark-warehouse"
 
 
 def load_uc_token(path: Path = UC_TOKEN_FILE) -> str:
@@ -42,6 +48,7 @@ def ensure_uc_catalog(name: str = CATALOG_NAME, uri: str = UC_URI, token: str | 
 def get_spark(app_name = "chip-lakehouse"):
     return (
         SparkSession.builder.appName(app_name)
+        .config("spark.sql.warehouse.dir", str(SPARK_WAREHOUSE_DIR))
         .config("spark.jars.packages", "io.delta:delta-spark_2.12:3.2.0,io.unitycatalog:unitycatalog-spark_2.12:0.2.1")
         .config("spark.sql.extensions","io.delta.sql.DeltaSparkSessionExtension")
         # Required for any Delta write, even a plain path-based .save() that

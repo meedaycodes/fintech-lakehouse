@@ -49,6 +49,15 @@ model-ready features.
    python3 src/manage_access.py --apply    # apply
    ```
 
+6. **Interactive exploration** (optional) — `notebooks/explore.ipynb` imports
+   the same `src/` modules the pipeline uses, for poking at results without
+   re-running a whole script:
+   ```bash
+   python3 -m ipykernel install --user --name=chip-lakehouse --display-name "chip-lakehouse (finenv)"
+   jupyter lab notebooks/
+   ```
+   No pipeline logic belongs in notebooks - see `docs/standard.md`.
+
 ## Project layout
 
 ```
@@ -56,6 +65,7 @@ src/            Spark session bootstrap, access reconciliation, pipeline stages
 docker/         Unity Catalog server (docker-compose + config)
 iam/            Declarative user/privilege config
 data_gen/       Synthetic data generation
+notebooks/      Interactive exploration (no pipeline logic)
 infra/          Terraform
 docs/           Governance, model card, standards
 tests/          Data quality tests

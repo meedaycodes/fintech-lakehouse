@@ -16,3 +16,7 @@ pyarrow
 matplotlib
 pytest
 streamlit
+
+# Interactive exploration (notebooks/) - not used by any pipeline stage
+jupyterlab
+ipykernel

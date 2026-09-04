@@ -20,10 +20,17 @@ data/lakehouse/
 # Rows that failed validation in silver_transform.py
 data/quarantine/
 
+# Spark's own scratch dir - explicitly pointed here by spark_session.py so
+# it can't scatter spark-warehouse/ elsewhere depending on cwd.
+data/spark-warehouse/
+
 # Terraform
 infra/.terraform/
 infra/*.tfstate
 infra/*.tfstate.*
+
+# Jupyter
+.ipynb_checkpoints/
 
 # OS / editor cruft
 .DS_Store
