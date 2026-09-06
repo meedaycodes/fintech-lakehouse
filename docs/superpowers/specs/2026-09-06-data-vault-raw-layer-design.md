@@ -39,9 +39,11 @@ source-tagged model that never updates a row in place, sits alongside
 
 - New schema `chip_lakehouse.vault`. Added to the `CREATE SCHEMA IF NOT
   EXISTS` loop in `spark_session.py` (`["bronze", "silver", "gold", "ml",
-  "vault"]`) and to `iam/access.yaml` with the same grants the other
-  read schemas already carry (`data-engineer`: full; `data-analyst`:
-  `USE SCHEMA` + `SELECT`).
+  "vault"]`) and to `iam/access.yaml` as a **`data-engineer`-only**
+  schema (`USE SCHEMA, CREATE TABLE, SELECT, MODIFY`), with **no
+  `data-analyst` entry** — exactly as `bronze` is treated today. The
+  vault is raw: `sat_user_details` holds `date_of_birth`, which `silver`
+  generalises to `age_band` specifically to keep it away from analysts.
 - New module `src/vault_load.py`, peer of `bronze_ingest.py` /
   `silver_transform.py` — one file per pipeline stage, named after what
   it produces, per `docs/standard.md`.
