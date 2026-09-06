@@ -440,3 +440,73 @@ def build_fct_account_monthly_snapshot(
             "transaction_count",
         )
     )
+
+
+if __name__ == "__main__":
+    spark = get_spark()
+    token = load_uc_token()
+
+    s_users = silver_table(spark, "users")
+    s_accounts = silver_table(spark, "accounts")
+    s_transactions = silver_table(spark, "transactions")
+    s_account_types = silver_table(spark, "account_types")
+    s_transaction_types = silver_table(spark, "transaction_types")
+
+    start, end = silver_date_bounds(s_users, s_accounts, s_transactions)
+    dim_date = build_dim_date(spark, start, end)
+    write_delta_table(token, dim_date, "gold", "dim_date")
+    print(f"gold.dim_date: {dim_date.count()} rows")
+
+    dim_txn_type = build_dim_transaction_type(s_transaction_types)
+    write_delta_table(token, dim_txn_type, "gold", "dim_transaction_type")
+    print(f"gold.dim_transaction_type: {dim_txn_type.count()} rows")
+
+    customer_input = s_users.select("user_id", "age_band", "signup_date")
+    merge_scd2(
+        token, spark, customer_input, "gold", "dim_customer",
+        business_key="user_id",
+        tracked_cols=["age_band", "signup_date"],
+        effective_from_col="signup_date",
+        surrogate_key="customer_key",
+    )
+    dim_customer = gold_table(spark, "dim_customer")
+    print(
+        f"gold.dim_customer: {dim_customer.count()} rows "
+        f"({dim_customer.where(F.col('is_current')).count()} current)"
+    )
+
+    account_input = s_accounts.join(s_account_types, "account_type_id", "inner").select(
+        "account_id",
+        "user_id",
+        "account_number_masked",
+        "opened_date",
+        F.col("type_name").alias("account_type"),
+        F.col("category").alias("account_type_category"),
+    )
+    merge_scd2(
+        token, spark, account_input, "gold", "dim_account",
+        business_key="account_id",
+        tracked_cols=[
+            "account_number_masked", "opened_date",
+            "account_type", "account_type_category",
+        ],
+        effective_from_col="opened_date",
+        surrogate_key="account_key",
+    )
+    dim_account = gold_table(spark, "dim_account")
+    print(
+        f"gold.dim_account: {dim_account.count()} rows "
+        f"({dim_account.where(F.col('is_current')).count()} current)"
+    )
+
+    fct_txn = build_fct_transaction(
+        s_transactions, s_transaction_types, dim_customer, dim_account
+    )
+    write_delta_table(token, fct_txn, "gold", "fct_transaction")
+    print(f"gold.fct_transaction: {fct_txn.count()} rows")
+
+    fct_snap = build_fct_account_monthly_snapshot(
+        s_transactions, s_accounts, s_transaction_types, dim_customer, dim_account
+    )
+    write_delta_table(token, fct_snap, "gold", "fct_account_monthly_snapshot")
+    print(f"gold.fct_account_monthly_snapshot: {fct_snap.count()} rows")
