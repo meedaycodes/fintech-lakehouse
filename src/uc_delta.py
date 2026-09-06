@@ -68,28 +68,86 @@ def uc_columns(fields: list[StructField]) -> list[dict]:
     return [_uc_column(position, field) for position, field in enumerate(fields)]
 
 
-def table_exists(token: str, schema: str, table_name: str) -> bool:
+def get_uc_table(token: str, schema: str, table_name: str) -> dict | None:
+    """Returns the table's current UC registration, or None if unregistered."""
     resp = requests.get(
         f"{UC_URI}/api/2.1/unity-catalog/tables/{CATALOG_NAME}.{schema}.{table_name}",
         headers={"Authorization": f"Bearer {token}"},
     )
-    return resp.status_code == 200
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.json()
+
+
+def delete_uc_table(token: str, schema: str, table_name: str) -> None:
+    """Drops the table's UC registration. The Delta files at its storage
+    location are untouched - this only removes the catalog entry, so it's
+    always paired with an immediate re-registration below.
+    """
+    resp = requests.delete(
+        f"{UC_URI}/api/2.1/unity-catalog/tables/{CATALOG_NAME}.{schema}.{table_name}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    resp.raise_for_status()
+
+
+def _normalize_location(location: str) -> str:
+    return location.rstrip("/")
+
+
+def _column_signature(columns: list[dict]) -> list[tuple]:
+    """Reduces a UC column list to the parts we register and can compare:
+    ordered (name, type_name) pairs. `position` is authoritative for order -
+    the REST response's list order isn't contractually guaranteed to match it.
+    """
+    ordered = sorted(columns, key=lambda c: c.get("position") or 0)
+    return [(c["name"], c["type_name"]) for c in ordered]
+
+
+def registration_is_current(existing: dict, location: str, columns: list[dict]) -> bool:
+    """True when `existing`'s storage location and column list already match
+    what we're about to register, i.e. re-registering would be a no-op.
+    """
+    return (
+        _normalize_location(existing.get("storage_location") or "") == _normalize_location(location)
+        and _column_signature(existing.get("columns") or []) == _column_signature(columns)
+    )
 
 
 def register_uc_table(token: str, schema: str, table_name: str, location: str, fields: list[StructField]) -> None:
-    """Registers the Delta files at `location` as a UC external table, if
-    not already registered. Overwriting the files on a re-run doesn't need
-    re-registration - only the first ingest for a given table does.
+    """Registers the Delta files at `location` as a UC external table, and
+    repairs the registration if one already exists but has drifted.
+
+    Overwriting the files on a re-run usually needs no re-registration, so
+    a matching registration stays a cheap no-op. But a name existing in UC
+    is *not* proof it's registered correctly: UC's REST-registered
+    storage_location and column list are a separate copy of the truth from
+    the Delta transaction log, and the two can diverge silently. Two ways
+    that's actually happened here: a schema change (silver.accounts gaining
+    account_type_id) left UC advertising the old columns while Spark - which
+    reads through the Delta log, not UC's column list - kept working fine;
+    and a table first written from a git worktree got registered against
+    that worktree's path, which stops existing when the worktree is removed.
+    So compare before deciding, and drop-and-recreate on any mismatch.
     """
-    if table_exists(token, schema, table_name):
-        return
+    columns = uc_columns(fields)
+    existing = get_uc_table(token, schema, table_name)
+    if existing is not None:
+        if registration_is_current(existing, location, columns):
+            return
+        print(
+            f"  UC registration for {schema}.{table_name} has drifted "
+            "(storage location or columns) - re-registering"
+        )
+        delete_uc_table(token, schema, table_name)
     body = {
         "name": table_name,
         "catalog_name": CATALOG_NAME,
         "schema_name": schema,
         "table_type": "EXTERNAL",
         "data_source_format": "DELTA",
-        "columns": uc_columns(fields),
+        "columns": columns,
         "storage_location": location,
     }
     resp = requests.post(
@@ -102,7 +160,8 @@ def register_uc_table(token: str, schema: str, table_name: str, location: str, f
 
 def write_delta_table(token: str, df: DataFrame, schema: str, table_name: str, mode: str = "overwrite") -> str:
     """Writes df as Delta files under data/lakehouse/<schema>/<table_name>
-    and registers it in UC if not already registered. Returns the location.
+    and registers it in UC - creating the registration, or repairing it if
+    it exists but has drifted from what was just written. Returns the location.
     """
     location = f"file://{(LAKEHOUSE_DIR / schema / table_name).resolve()}"
     writer = df.write.format("delta").mode(mode)
