@@ -119,18 +119,22 @@ def transform_users(bronze_users: DataFrame) -> DataFrame:
     )
 
 
-def transform_accounts(bronze_accounts: DataFrame, silver_users: DataFrame) -> DataFrame:
+def transform_accounts(bronze_accounts: DataFrame, silver_users: DataFrame, account_types: DataFrame) -> DataFrame:
     deduped = dedupe_latest(bronze_accounts, ["account_id"])
 
-    valid_type = deduped.filter(F.col("account_type").isin(ACCOUNT_TYPES))
-    quarantine(deduped.filter(~F.col("account_type").isin(ACCOUNT_TYPES)), "accounts_bad_type")
+    lookup = account_types.select("account_type_id", "type_name")
+    bad_type = deduped.join(lookup, deduped.account_type == lookup.type_name, "left_anti")
+    quarantine(bad_type, "accounts_bad_type")
 
-    typed = valid_type.select(
-        "account_id",
-        "user_id",
-        "account_type",
-        F.concat(F.lit("****"), F.substring(F.col("account_number"), -4, 4)).alias("account_number_masked"),
-        F.col("opened_date").cast("date"),
+    typed = (
+        deduped.join(lookup, deduped.account_type == lookup.type_name, "inner")
+        .select(
+            "account_id",
+            "user_id",
+            "account_type_id",
+            F.concat(F.lit("****"), F.substring(F.col("account_number"), -4, 4)).alias("account_number_masked"),
+            F.col("opened_date").cast("date"),
+        )
     )
 
     parent_keys = silver_users.select("user_id")
@@ -192,7 +196,7 @@ if __name__ == "__main__":
     write_delta_table(token, silver_users, "silver", "users")
     print(f"silver.users: {silver_users.count()} rows")
 
-    silver_accounts = transform_accounts(bronze_table(spark, "accounts"), silver_users)
+    silver_accounts = transform_accounts(bronze_table(spark, "accounts"), silver_users, account_types)
     write_delta_table(token, silver_accounts, "silver", "accounts")
     print(f"silver.accounts: {silver_accounts.count()} rows")
 
