@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 from pyspark.sql import Row
@@ -5,6 +6,7 @@ from pyspark.sql import functions as F
 
 import silver_transform
 from gold_marts import build_account_summary
+from gold_star import build_dim_date
 from silver_transform import (
     build_account_types,
     build_transaction_types,
@@ -224,3 +226,18 @@ def test_build_account_summary_classifies_by_direction_and_resolves_label(spark)
     assert row["total_inflows"] == Decimal("100.00")
     assert row["total_outflows"] == Decimal("30.00")
     assert row["balance"] == Decimal("70.00")
+
+
+def test_build_dim_date_spans_and_flags(spark):
+    dim = build_dim_date(spark, date(2024, 1, 1), date(2024, 3, 31))
+    rows = {r["date_key"]: r for r in dim.collect()}
+
+    assert dim.count() == 91  # Jan 31 + Feb 29 (2024 leap) + Mar 31
+    assert 20240101 in rows and 20240331 in rows
+    assert rows[20240131]["is_month_end"]
+    assert not rows[20240115]["is_month_end"]
+    # 2024-01-06 is a Saturday, 2024-01-08 is a Monday
+    assert rows[20240106]["day_of_week"] == 6
+    assert rows[20240106]["is_weekend"]
+    assert rows[20240108]["day_of_week"] == 1
+    assert not rows[20240108]["is_weekend"]
