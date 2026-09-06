@@ -14,8 +14,14 @@ point is that each layer's guarantees are absolute, not "usually true."
 |---|---|---|
 | `bronze` | Raw, as close to source shape as possible. Schema-inferred, not hand-typed. Tagged with `_ingested_at`. No cleaning, no dedup, no PII handling. | [bronze_ingest.py](../src/bronze_ingest.py) |
 | `silver` | Deduplicated (one row per primary key), explicitly typed, every FK referentially valid, direct identifiers removed. Still one-to-one with bronze entities - no joins, no aggregation - apart from reference/lookup tables added to normalize a category column (see Naming conventions). | [silver_transform.py](../src/silver_transform.py) |
-| `gold` | Business-level marts: joined, aggregated, dimensional. Consumers (dashboards, analysts) query gold, not silver, for anything beyond raw entity lookups. | [gold_marts.py](../src/gold_marts.py) (pending) |
+| `gold` | Business-level marts: joined, aggregated, dimensional. Consumers (dashboards, analysts) query gold, not silver, for anything beyond raw entity lookups. | [gold_marts.py](../src/gold_marts.py), [gold_star.py](../src/gold_star.py) |
 | `ml` | Model-ready feature tables, built from silver/gold. | [ml_train_register.py](../src/ml_train_register.py) (pending) |
+
+The `gold` schema holds two shapes side by side: pre-aggregated wide
+marts (`account_summary`, `customer_360`, from `gold_marts.py`) and a
+conformed Kimball star (`dim_*` / `fct_*`, from `gold_star.py`). Both are
+built from silver; the star is reconciled against the marts by
+`tests/verify_e2e.py` so the two can't silently diverge.
 
 Bronze is intentionally dumb (garbage in, garbage stored) so that silver has a
 single, auditable place where every cleaning decision is made once. Don't
@@ -27,6 +33,11 @@ tables directly in gold.
 **Catalog/schema/table**
 - One catalog: `chip_lakehouse`. Schema names are single lowercase words matching the layer (`bronze`, `silver`, `gold`, `ml`).
 - Table names are plural, snake_case, and identical across layers for the same entity (`bronze.accounts` → `silver.accounts`) - a table renamed between layers is a sign the transform is doing more than cleaning (see Layer contracts above). The one exception is a reference/lookup table introduced purely to normalize a column (`silver.account_types`, `silver.transaction_types`): it has no bronze counterpart to match names with, because it isn't a source entity at all.
+- Dimensional tables in `gold` are prefixed `dim_` / `fct_`
+  (`dim_customer`, `fct_transaction`). This is the one place a table name
+  carries a shape prefix - the star schema is a deliberate second
+  modelling style layered over the same silver, and the prefix is how a
+  consumer tells a conformed dimension from a wide mart at a glance.
 
 **Columns**
 - snake_case throughout, no abbreviations that aren't already domain-standard (`iban` would be fine; `acct_no` would not).
@@ -34,6 +45,18 @@ tables directly in gold.
 - Reference/lookup tables are the carve-out to that rule: `silver.account_types` and `silver.transaction_types` use small hardcoded integer surrogate keys (`account_type_id`, `transaction_type_id`). The UUID rule exists to keep keys stable and source-owned rather than assigned by whichever database happened to load the row first - but these tables are tiny, static, code-known enumerations seeded from a literal list in [silver_transform.py](../src/silver_transform.py), not database-assigned sequences, so the failure mode it guards against can't arise. A readable `1`/`2`/`3` beats a UUID on a table a human reads directly.
 - Pipeline metadata columns are prefixed with `_` and never carry business meaning (`_ingested_at`). Purely transient columns used mid-transform and dropped before write are also `_`-prefixed (e.g. `_rn` in `dedupe_latest`) so they're unmistakable if one ever leaks into an output by accident.
 - A column that has been transformed away from its bronze meaning gets a new name that says so, rather than silently changing what the same name means between layers: `account_number` (full IBAN, bronze) becomes `account_number_masked` (last 4 digits, silver), `date_of_birth` (exact date, bronze) becomes `age_band` (10-year bucket, silver). If you can `SELECT column_name FROM bronze... UNION ALL SELECT column_name FROM silver...` and get two different *kinds* of data back, the column needs two different names.
+- Dimensional surrogate keys: `<entity>_key`, a pipeline-generated
+  integer, used only in the `gold` star (`customer_key`, `account_key`).
+  The source UUID is retained alongside as the business key (`user_id`,
+  `account_id`). This is the only sanctioned non-UUID, pipeline-assigned
+  key; it exists to support SCD2 versioning and is never exposed as a
+  source identifier. (`dim_date.date_key` is a `yyyymmdd` smart integer;
+  `dim_transaction_type.transaction_type_key` reuses
+  `silver.transaction_types.transaction_type_id`.)
+- SCD2 history columns, on dimensions that track change (`dim_customer`,
+  `dim_account`): `valid_from` (date, inclusive), `valid_to` (date,
+  exclusive; `9999-12-31` while open), `is_current` (boolean), `row_hash`
+  (sha2-256 hex of the tracked attributes, for change detection).
 
 **IAM principals** ([iam/access.yaml](../iam/access.yaml))
 - `<role>@chip-lakehouse.local` - e.g. `data-engineer@chip-lakehouse.local`, `data-analyst@chip-lakehouse.local`. Role-shaped, not person-shaped; a real deployment would map SSO identities to these roles rather than creating one UC user per role.
@@ -78,7 +101,7 @@ partition, not before.
 
 ## Testing strategy
 
-Three layers of verification, each catching a different class of problem:
+Four layers of verification, each catching a different class of problem:
 
 **1. Source data integrity** ([data_gen/check_referential_integrity.py](../data_gen/check_referential_integrity.py))
 Runs against the raw generated CSVs, before anything touches Spark or UC:
@@ -125,3 +148,15 @@ duplicate-PK case (proving `dedupe_latest` keeps the latest, not an arbitrary
 row), one bad-enum case, and one orphaned-FK case. A test that only exercises
 the happy path doesn't prove the quarantine logic works - it proves it didn't
 crash on clean data, which the generator already guarantees on its own.
+
+**4. End-to-end invariant checks against the live catalog** ([tests/verify_e2e.py](../tests/verify_e2e.py))
+A standalone script (not a pytest case - it needs the Docker Unity
+Catalog stack and a full pipeline run). Checks cross-layer invariants no
+unit test can see: silver FK/enum resolution, row-count conservation
+from `silver.transactions` into `gold.fct_transaction`, the
+`customer_360` / `account_summary` balance agreement, Kimball star
+reconciliation (`sum(fct_transaction.signed_amount)` and the latest
+monthly-snapshot `closing_balance` both tie to `account_summary.balance`),
+fact-to-dimension FK integrity, and SCD2 range integrity. Prints
+`PASS` / `FAIL` per check and exits non-zero on any failure. Run it after
+`gold_star.py`.

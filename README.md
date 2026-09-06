@@ -11,7 +11,8 @@ model-ready features.
 - **Catalog**: [Unity Catalog OSS](https://www.unitycatalog.io/) running in
   Docker, fronted by Spark's `UCSingleCatalog` connector
 - **Schemas**: `bronze` (raw ingest) → `silver` (cleaned/conformed) → `gold`
-  (business-level marts) → `ml` (features/model inputs)
+  (business-level marts), including a conformed Kimball star (`dim_*` / `fct_*`)
+  → `ml` (features/model inputs)
 - **Access control**: declarative, in [iam/access.yaml](iam/access.yaml),
   applied via [src/manage_access.py](src/manage_access.py)
 
@@ -57,6 +58,23 @@ model-ready features.
    jupyter lab notebooks/
    ```
    No pipeline logic belongs in notebooks - see `docs/standard.md`.
+
+## Running the pipeline
+
+After setup, run the stages in order (each writes into the `chip_lakehouse` catalog):
+
+```bash
+python3 data_gen/generate_data.py     # synthetic CSVs (first run only)
+python3 src/bronze_ingest.py          # raw -> bronze
+python3 src/silver_transform.py       # bronze -> silver (cleaned, normalized)
+python3 src/gold_marts.py             # silver -> gold wide marts
+python3 src/gold_star.py              # silver -> gold Kimball star (dim_*/fct_*)
+python3 tests/verify_e2e.py           # cross-layer invariant checks
+```
+
+`gold_marts.py` and `gold_star.py` are independent and can run in either
+order. `gold_star.py`'s `dim_customer` / `dim_account` persist across
+runs (SCD2); every other gold table is a full overwrite.
 
 ## Project layout
 
