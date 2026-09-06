@@ -39,9 +39,6 @@ from uc_delta import write_delta_table
 
 QUARANTINE_DIR = Path(__file__).resolve().parent.parent / "data" / "quarantine"
 
-ACCOUNT_TYPES = ["savings", "investment", "pension"]
-TRANSACTION_TYPES = ["deposit", "withdrawal", "roundup", "investment_contribution"]
-
 # Inmon-style lookup tables (silver.account_types, silver.transaction_types).
 # Hardcoded, not derived from data - these are small, closed, code-known
 # enumerations. direction drives gold_marts.py's inflow/outflow
@@ -142,19 +139,23 @@ def transform_accounts(bronze_accounts: DataFrame, silver_users: DataFrame, acco
     return typed.join(parent_keys, "user_id", "left_semi")
 
 
-def transform_transactions(bronze_transactions: DataFrame, silver_accounts: DataFrame) -> DataFrame:
+def transform_transactions(bronze_transactions: DataFrame, silver_accounts: DataFrame, transaction_types: DataFrame) -> DataFrame:
     deduped = dedupe_latest(bronze_transactions, ["transaction_id"])
 
-    valid_type = deduped.filter(F.col("transaction_type").isin(TRANSACTION_TYPES))
-    quarantine(deduped.filter(~F.col("transaction_type").isin(TRANSACTION_TYPES)), "transactions_bad_type")
+    lookup = transaction_types.select("transaction_type_id", "type_name")
+    bad_type = deduped.join(lookup, deduped.transaction_type == lookup.type_name, "left_anti")
+    quarantine(bad_type, "transactions_bad_type")
 
-    typed = valid_type.select(
-        "transaction_id",
-        "account_id",
-        "transaction_type",
-        F.col("amount").cast(DecimalType(10, 2)).alias("amount"),
-        "currency",
-        F.col("transaction_ts").cast("timestamp"),
+    typed = (
+        deduped.join(lookup, deduped.transaction_type == lookup.type_name, "inner")
+        .select(
+            "transaction_id",
+            "account_id",
+            "transaction_type_id",
+            F.col("amount").cast(DecimalType(10, 2)).alias("amount"),
+            "currency",
+            F.col("transaction_ts").cast("timestamp"),
+        )
     )
 
     parent_keys = silver_accounts.select("account_id")
@@ -200,7 +201,7 @@ if __name__ == "__main__":
     write_delta_table(token, silver_accounts, "silver", "accounts")
     print(f"silver.accounts: {silver_accounts.count()} rows")
 
-    silver_transactions = transform_transactions(bronze_table(spark, "transactions"), silver_accounts)
+    silver_transactions = transform_transactions(bronze_table(spark, "transactions"), silver_accounts, transaction_types)
     write_delta_table(token, silver_transactions, "silver", "transactions")
     print(f"silver.transactions: {silver_transactions.count()} rows")
 

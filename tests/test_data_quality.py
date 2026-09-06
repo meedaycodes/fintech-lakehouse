@@ -1,7 +1,7 @@
 from pyspark.sql import Row
 from pyspark.sql import functions as F
 
-from silver_transform import build_account_types, build_transaction_types, transform_accounts
+from silver_transform import build_account_types, build_transaction_types, transform_accounts, transform_transactions
 
 
 def test_build_account_types_has_expected_rows(spark):
@@ -64,5 +64,47 @@ def test_transform_accounts_quarantines_unrecognized_type(spark):
     )
 
     result = transform_accounts(bronze_accounts, silver_users, account_types)
+
+    assert result.count() == 0
+
+
+def test_transform_transactions_assigns_fk(spark):
+    transaction_types = build_transaction_types(spark)
+    silver_accounts = spark.createDataFrame([Row(account_id="a1")])
+    bronze_transactions = (
+        spark.createDataFrame([
+            Row(
+                transaction_id="t1", account_id="a1", transaction_type="withdrawal",
+                amount=100.50, currency="GBP", transaction_ts="2026-01-01 00:00:00",
+                _ingested_at="2026-01-01 00:00:00",
+            ),
+        ])
+        .withColumn("transaction_ts", F.to_timestamp("transaction_ts"))
+        .withColumn("_ingested_at", F.to_timestamp("_ingested_at"))
+    )
+
+    result = transform_transactions(bronze_transactions, silver_accounts, transaction_types).collect()
+
+    assert len(result) == 1
+    assert result[0]["transaction_type_id"] == 2  # withdrawal
+    assert float(result[0]["amount"]) == 100.50
+
+
+def test_transform_transactions_quarantines_unrecognized_type(spark):
+    transaction_types = build_transaction_types(spark)
+    silver_accounts = spark.createDataFrame([Row(account_id="a1")])
+    bronze_transactions = (
+        spark.createDataFrame([
+            Row(
+                transaction_id="t1", account_id="a1", transaction_type="BOGUS",
+                amount=100.50, currency="GBP", transaction_ts="2026-01-01 00:00:00",
+                _ingested_at="2026-01-01 00:00:00",
+            ),
+        ])
+        .withColumn("transaction_ts", F.to_timestamp("transaction_ts"))
+        .withColumn("_ingested_at", F.to_timestamp("_ingested_at"))
+    )
+
+    result = transform_transactions(bronze_transactions, silver_accounts, transaction_types)
 
     assert result.count() == 0
