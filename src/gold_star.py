@@ -248,3 +248,63 @@ def merge_scd2(
 
     fields = spark.read.format("delta").load(location).schema.fields
     register_uc_table(token, schema, table, location, fields)
+
+
+def _date_key(col):
+    return F.date_format(col, "yyyyMMdd").cast("int")
+
+
+def build_fct_transaction(
+    silver_transactions: DataFrame,
+    silver_transaction_types: DataFrame,
+    dim_customer: DataFrame,
+    dim_account: DataFrame,
+) -> DataFrame:
+    direction = silver_transaction_types.select("transaction_type_id", "direction")
+    txn = (
+        silver_transactions.join(direction, "transaction_type_id", "inner")
+        .withColumn("_txn_date", F.to_date("transaction_ts"))
+    )
+
+    acct = dim_account.select(
+        "account_key",
+        F.col("account_id").alias("_ba"),
+        F.col("user_id").alias("_owner"),
+        F.col("valid_from").alias("_af"),
+        F.col("valid_to").alias("_at"),
+    )
+    with_acct = txn.join(
+        acct,
+        (txn["account_id"] == acct["_ba"])
+        & (txn["_txn_date"] >= acct["_af"])
+        & (txn["_txn_date"] < acct["_at"]),
+        "inner",
+    )
+
+    cust = dim_customer.select(
+        "customer_key",
+        F.col("user_id").alias("_bu"),
+        F.col("valid_from").alias("_cf"),
+        F.col("valid_to").alias("_ct"),
+    )
+    with_cust = with_acct.join(
+        cust,
+        (with_acct["_owner"] == cust["_bu"])
+        & (with_acct["_txn_date"] >= cust["_cf"])
+        & (with_acct["_txn_date"] < cust["_ct"]),
+        "inner",
+    )
+
+    amount = F.col("amount").cast("decimal(12,2)")
+    return with_cust.select(
+        _date_key(F.col("_txn_date")).alias("date_key"),
+        "customer_key",
+        "account_key",
+        F.col("transaction_type_id").alias("transaction_type_key"),
+        "transaction_id",
+        amount.alias("amount"),
+        F.when(F.col("direction") == "inflow", amount)
+        .otherwise(-amount)
+        .alias("signed_amount"),
+        "currency",
+    )

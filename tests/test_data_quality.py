@@ -10,6 +10,7 @@ from gold_star import (
     _delta_log_exists,
     build_dim_date,
     build_dim_transaction_type,
+    build_fct_transaction,
     plan_scd2,
 )
 from silver_transform import (
@@ -339,3 +340,75 @@ def test_plan_scd2_new_business_key_inserts(spark):
     assert ins[0]["user_id"] == "u2"
     assert ins[0]["customer_key"] == 2
     assert ins[0]["valid_from"] == date(2023, 3, 1)  # effective_from, not run_date
+
+
+def _dim_account_row(spark, rows):
+    return spark.createDataFrame(
+        rows, ["account_key", "account_id", "user_id", "valid_from", "valid_to"]
+    )
+
+
+def _dim_customer_row(spark, rows):
+    return spark.createDataFrame(
+        rows, ["customer_key", "user_id", "valid_from", "valid_to"]
+    )
+
+
+def _txns(spark, rows):
+    cols = [
+        "transaction_id", "account_id", "transaction_type_id",
+        "amount", "currency", "transaction_ts",
+    ]
+    return spark.createDataFrame(rows, cols).withColumn(
+        "transaction_ts", F.to_timestamp("transaction_ts")
+    )
+
+
+def test_build_fct_transaction_signed_amount_by_direction(spark):
+    stt = spark.createDataFrame(
+        [(1, "inflow"), (2, "outflow")], ["transaction_type_id", "direction"]
+    )
+    st = _txns(spark, [
+        ("t1", "a1", 1, Decimal("100.00"), "GBP", "2026-01-01 10:00:00"),
+        ("t2", "a1", 2, Decimal("40.00"), "GBP", "2026-01-02 10:00:00"),
+    ])
+    da = _dim_account_row(spark, [(10, "a1", "u1", date(2020, 1, 1), date(9999, 12, 31))])
+    dc = _dim_customer_row(spark, [(20, "u1", date(2019, 1, 1), date(9999, 12, 31))])
+
+    rows = {r["transaction_id"]: r for r in build_fct_transaction(st, stt, dc, da).collect()}
+    assert rows["t1"]["signed_amount"] == Decimal("100.00")
+    assert rows["t2"]["signed_amount"] == Decimal("-40.00")
+    assert rows["t1"]["date_key"] == 20260101
+    assert rows["t1"]["customer_key"] == 20 and rows["t1"]["account_key"] == 10
+    assert rows["t1"]["transaction_type_key"] == 1
+
+
+def test_build_fct_transaction_point_in_time_join(spark):
+    stt = spark.createDataFrame([(1, "inflow")], ["transaction_type_id", "direction"])
+    st = _txns(spark, [
+        ("t_early", "a1", 1, Decimal("10.00"), "GBP", "2026-01-10 10:00:00"),
+        ("t_late", "a1", 1, Decimal("10.00"), "GBP", "2026-06-10 10:00:00"),
+    ])
+    da = _dim_account_row(spark, [
+        (10, "a1", "u1", date(2020, 1, 1), date(2026, 3, 1)),
+        (11, "a1", "u1", date(2026, 3, 1), date(9999, 12, 31)),
+    ])
+    dc = _dim_customer_row(spark, [(20, "u1", date(2019, 1, 1), date(9999, 12, 31))])
+
+    keyed = {r["transaction_id"]: r["account_key"] for r in build_fct_transaction(st, stt, dc, da).collect()}
+    assert keyed["t_early"] == 10
+    assert keyed["t_late"] == 11
+
+
+def test_build_fct_transaction_row_count_preserved(spark):
+    stt = spark.createDataFrame(
+        [(1, "inflow"), (2, "outflow")], ["transaction_type_id", "direction"]
+    )
+    st = _txns(spark, [
+        (f"t{i}", "a1", (i % 2) + 1, Decimal("5.00"), "GBP", "2026-02-01 10:00:00")
+        for i in range(7)
+    ])
+    da = _dim_account_row(spark, [(10, "a1", "u1", date(2020, 1, 1), date(9999, 12, 31))])
+    dc = _dim_customer_row(spark, [(20, "u1", date(2019, 1, 1), date(9999, 12, 31))])
+
+    assert build_fct_transaction(st, stt, dc, da).count() == 7
