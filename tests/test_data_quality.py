@@ -455,3 +455,22 @@ def test_build_fct_account_monthly_snapshot_month_end_date_key(spark):
     out = build_fct_account_monthly_snapshot(st, sa, stt, dc, da).collect()
     assert len(out) == 1
     assert out[0]["date_key"] == 20260430  # April month-end
+
+
+def test_build_fct_account_monthly_snapshot_account_opened_after_last_txn_month(spark):
+    stt = spark.createDataFrame([(1, "inflow")], ["transaction_type_id", "direction"])
+    # The only transaction in the data belongs to a DIFFERENT account (a0),
+    # in May 2026. Account a1 opened 2026-08-01 - strictly after max_month.
+    st = _txns(spark, [("t1", "a0", 1, Decimal("50.00"), "GBP", "2026-05-10 10:00:00")])
+    sa = spark.createDataFrame(
+        [("a1", "u1", date(2026, 8, 1))], ["account_id", "user_id", "opened_date"]
+    )
+    da = _dim_account_row(spark, [(10, "a1", "u1", date(2020, 1, 1), date(9999, 12, 31))])
+    dc = _dim_customer_row(spark, [(20, "u1", date(2019, 1, 1), date(9999, 12, 31))])
+
+    out = build_fct_account_monthly_snapshot(st, sa, stt, dc, da).collect()
+    assert len(out) == 1
+    assert out[0]["date_key"] == 20260831  # August month-end
+    assert out[0]["transaction_count"] == 0
+    assert out[0]["month_inflow"] == Decimal("0.00")
+    assert out[0]["closing_balance"] == Decimal("0.00")

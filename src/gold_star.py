@@ -339,7 +339,12 @@ def build_fct_account_monthly_snapshot(
         .withColumn(
             "_month",
             F.explode(
-                F.sequence(F.col("_start"), F.lit(max_month), F.expr("interval 1 month"))
+                F.when(
+                    F.col("_start") <= F.lit(max_month),
+                    F.sequence(
+                        F.col("_start"), F.lit(max_month), F.expr("interval 1 month")
+                    ),
+                ).otherwise(F.array(F.col("_start"))),
             ),
         )
         .withColumn("_month_end", F.last_day("_month"))
