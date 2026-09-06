@@ -6,7 +6,12 @@ from pyspark.sql import functions as F
 
 import silver_transform
 from gold_marts import build_account_summary
-from gold_star import build_dim_date, build_dim_transaction_type, plan_scd2
+from gold_star import (
+    _delta_log_exists,
+    build_dim_date,
+    build_dim_transaction_type,
+    plan_scd2,
+)
 from silver_transform import (
     build_account_types,
     build_transaction_types,
@@ -241,6 +246,13 @@ def test_build_dim_date_spans_and_flags(spark):
     assert rows[20240106]["is_weekend"]
     assert rows[20240108]["day_of_week"] == 1
     assert not rows[20240108]["is_weekend"]
+
+
+def test_delta_log_exists(tmp_path):
+    loc = f"file://{tmp_path}"
+    assert not _delta_log_exists(loc)
+    (tmp_path / "_delta_log").mkdir()
+    assert _delta_log_exists(loc)
 
 
 def test_build_dim_transaction_type_passthrough(spark):

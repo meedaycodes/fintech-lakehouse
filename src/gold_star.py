@@ -173,3 +173,78 @@ def plan_scd2(
         .distinct()
     )
     return inserts, expire
+
+
+def _delta_log_exists(location: str) -> bool:
+    from pathlib import Path
+
+    return Path(location.replace("file://", "")).joinpath("_delta_log").is_dir()
+
+
+def merge_scd2(
+    token,
+    spark,
+    incoming: DataFrame,
+    schema: str,
+    table: str,
+    *,
+    business_key: str,
+    tracked_cols: list[str],
+    effective_from_col: str,
+    surrogate_key: str,
+) -> None:
+    from delta.tables import DeltaTable
+
+    location = f"file://{(LAKEHOUSE_DIR / schema / table).resolve()}"
+    first_load = (
+        get_uc_table(token, schema, table) is None
+        and not _delta_log_exists(location)
+    )
+
+    if first_load:
+        inserts, _ = plan_scd2(
+            incoming,
+            None,
+            business_key=business_key,
+            tracked_cols=tracked_cols,
+            effective_from_col=effective_from_col,
+            surrogate_key=surrogate_key,
+            run_date=date.today(),
+        )
+        write_delta_table(token, inserts, schema, table)
+        return
+
+    run_date = date.today()
+    current = spark.read.format("delta").load(location)
+    inserts, expire = plan_scd2(
+        incoming,
+        current,
+        business_key=business_key,
+        tracked_cols=tracked_cols,
+        effective_from_col=effective_from_col,
+        surrogate_key=surrogate_key,
+        run_date=run_date,
+    )
+
+    if expire.count() > 0:
+        (
+            DeltaTable.forPath(spark, location)
+            .alias("t")
+            .merge(
+                expire.alias("s"),
+                f"t.{business_key} = s.{business_key} AND t.is_current = true",
+            )
+            .whenMatchedUpdate(
+                set={
+                    "valid_to": f"DATE '{run_date.isoformat()}'",
+                    "is_current": "false",
+                }
+            )
+            .execute()
+        )
+
+    if inserts.count() > 0:
+        inserts.write.format("delta").mode("append").save(location)
+
+    fields = spark.read.format("delta").load(location).schema.fields
+    register_uc_table(token, schema, table, location, fields)
