@@ -1,7 +1,15 @@
+from decimal import Decimal
+
 from pyspark.sql import Row
 from pyspark.sql import functions as F
 
-from silver_transform import build_account_types, build_transaction_types, transform_accounts, transform_transactions
+from gold_marts import build_account_summary
+from silver_transform import (
+    build_account_types,
+    build_transaction_types,
+    transform_accounts,
+    transform_transactions,
+)
 
 
 def test_build_account_types_has_expected_rows(spark):
@@ -108,3 +116,32 @@ def test_transform_transactions_quarantines_unrecognized_type(spark):
     result = transform_transactions(bronze_transactions, silver_accounts, transaction_types)
 
     assert result.count() == 0
+
+
+def test_build_account_summary_classifies_by_direction_and_resolves_label(spark):
+    account_types = build_account_types(spark)
+    transaction_types = build_transaction_types(spark)
+
+    silver_accounts = (
+        spark.createDataFrame([Row(account_id="a1", user_id="u1", account_type_id=1, opened_date="2021-01-01")])
+        .withColumn("opened_date", F.to_date("opened_date"))
+    )
+
+    silver_transactions = (
+        spark.createDataFrame([
+            Row(transaction_id="t1", account_id="a1", transaction_type_id=1,
+                amount=Decimal("100.00"), currency="GBP", transaction_ts="2026-01-01 00:00:00"),  # deposit -> inflow
+            Row(transaction_id="t2", account_id="a1", transaction_type_id=2,
+                amount=Decimal("30.00"), currency="GBP", transaction_ts="2026-01-02 00:00:00"),  # withdrawal -> outflow
+        ])
+        .withColumn("transaction_ts", F.to_timestamp("transaction_ts"))
+    )
+
+    result = build_account_summary(silver_accounts, silver_transactions, account_types, transaction_types).collect()
+
+    assert len(result) == 1
+    row = result[0]
+    assert row["account_type"] == "savings"
+    assert row["total_inflows"] == Decimal("100.00")
+    assert row["total_outflows"] == Decimal("30.00")
+    assert row["balance"] == Decimal("70.00")

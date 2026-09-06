@@ -31,11 +31,6 @@ from pyspark.sql.types import DecimalType
 from spark_session import CATALOG_NAME, get_spark, load_uc_token
 from uc_delta import write_delta_table
 
-# Everything increases an account's balance except a withdrawal - a
-# roundup sweeps spare change *into* the account, same direction as a
-# deposit or an investment contribution.
-INFLOW_TRANSACTION_TYPES = ["deposit", "roundup", "investment_contribution"]
-
 def zero_decimal():
     # Built lazily, not at module import time - F.lit() needs an active
     # SparkSession, which doesn't exist yet when this module is imported.
@@ -50,21 +45,42 @@ def gold_table(spark, name: str) -> DataFrame:
     return spark.table(f"{CATALOG_NAME}.gold.{name}")
 
 
-def build_account_summary(silver_accounts: DataFrame, silver_transactions: DataFrame) -> DataFrame:
+def build_account_summary(
+    silver_accounts: DataFrame,
+    silver_transactions: DataFrame,
+    account_types: DataFrame,
+    transaction_types: DataFrame,
+) -> DataFrame:
     zero = zero_decimal()
 
-    txn_agg = silver_transactions.groupBy("account_id").agg(
-        F.sum(F.when(F.col("transaction_type").isin(INFLOW_TRANSACTION_TYPES), F.col("amount"))).alias("total_inflows"),
-        F.sum(F.when(F.col("transaction_type") == "withdrawal", F.col("amount"))).alias("total_outflows"),
+    # direction now lives in silver.transaction_types, not a Python list -
+    # this is the actual point of the Inmon refactor: the business rule
+    # that used to be INFLOW_TRANSACTION_TYPES in code is now governed data.
+    txn_with_direction = silver_transactions.join(
+        transaction_types.select("transaction_type_id", "direction"), "transaction_type_id", "inner"
+    )
+
+    txn_agg = txn_with_direction.groupBy("account_id").agg(
+        F.sum(F.when(F.col("direction") == "inflow", F.col("amount"))).alias("total_inflows"),
+        F.sum(F.when(F.col("direction") == "outflow", F.col("amount"))).alias("total_outflows"),
         F.count(F.lit(1)).alias("transaction_count"),
         F.min("transaction_ts").alias("first_transaction_ts"),
         F.max("transaction_ts").alias("last_transaction_ts"),
     )
 
+    # silver normalizes account_type for governance; gold resolves it back
+    # to a readable label for consumption - that's gold's job per
+    # docs/standard.md's layer contract.
+    accounts_with_label = silver_accounts.join(
+        account_types.select("account_type_id", F.col("type_name").alias("account_type")),
+        "account_type_id",
+        "inner",
+    )
+
     # left join: an account with zero transactions still gets a row here,
     # with a zero balance rather than disappearing from the mart.
     return (
-        silver_accounts.join(txn_agg, "account_id", "left")
+        accounts_with_label.join(txn_agg, "account_id", "left")
         .select(
             "account_id",
             "user_id",
@@ -126,7 +142,10 @@ if __name__ == "__main__":
     token = load_uc_token()
 
     account_summary = build_account_summary(
-        silver_table(spark, "accounts"), silver_table(spark, "transactions")
+        silver_table(spark, "accounts"),
+        silver_table(spark, "transactions"),
+        silver_table(spark, "account_types"),
+        silver_table(spark, "transaction_types"),
     )
     write_delta_table(token, account_summary, "gold", "account_summary")
     print(f"gold.account_summary: {account_summary.count()} rows")
