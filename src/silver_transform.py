@@ -5,9 +5,12 @@ Run after src/bronze_ingest.py:
     python3 src/silver_transform.py
 
 Design:
-  - Same four entities as bronze, one-to-one - no joins/aggregation into a
-    wide or dimensional shape here. That's gold_marts.py's job; silver's
-    contract is "clean, deduped, typed, referentially sound, PII-safe."
+  - The same four entities as bronze, one-to-one, plus two reference
+    tables (account_types, transaction_types) that exist only to normalize
+    silver's own category columns and so have no bronze counterpart. Six
+    tables in total, and still no joins/aggregation into a wide or
+    dimensional shape here. That's gold_marts.py's job; silver's contract
+    is "clean, deduped, typed, referentially sound, PII-safe."
   - Dedup: keep the latest row per primary key by _ingested_at, via a
     window function rather than a bare dropDuplicates() - so a row that
     arrives twice (e.g. via both a full reload and an incremental append)
@@ -16,8 +19,9 @@ Design:
     floats carry rounding error that's unacceptable for financial
     figures), dates/timestamps are cast explicitly rather than trusted
     from bronze's loose CSV-inferred types, and category columns are
-    validated against their known enum - anything else is quarantined,
-    not silently kept or silently dropped.
+    replaced by an FK resolved through a join against their lookup table -
+    a value with no matching lookup row is quarantined, not silently kept
+    or silently dropped.
   - Referential sanity: every FK is inner-joined (via left_semi/left_anti)
     against its already-cleaned silver parent, rather than trusted from
     bronze. Orphans go to data/quarantine/, not /dev/null.

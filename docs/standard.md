@@ -13,7 +13,7 @@ point is that each layer's guarantees are absolute, not "usually true."
 | Layer | Contract | Enforced by |
 |---|---|---|
 | `bronze` | Raw, as close to source shape as possible. Schema-inferred, not hand-typed. Tagged with `_ingested_at`. No cleaning, no dedup, no PII handling. | [bronze_ingest.py](../src/bronze_ingest.py) |
-| `silver` | Deduplicated (one row per primary key), explicitly typed, every FK referentially valid, direct identifiers removed. Still one-to-one with bronze entities - no joins, no aggregation. | [silver_transform.py](../src/silver_transform.py) |
+| `silver` | Deduplicated (one row per primary key), explicitly typed, every FK referentially valid, direct identifiers removed. Still one-to-one with bronze entities - no joins, no aggregation - apart from reference/lookup tables added to normalize a category column (see Naming conventions). | [silver_transform.py](../src/silver_transform.py) |
 | `gold` | Business-level marts: joined, aggregated, dimensional. Consumers (dashboards, analysts) query gold, not silver, for anything beyond raw entity lookups. | [gold_marts.py](../src/gold_marts.py) (pending) |
 | `ml` | Model-ready feature tables, built from silver/gold. | [ml_train_register.py](../src/ml_train_register.py) (pending) |
 
@@ -26,11 +26,12 @@ tables directly in gold.
 
 **Catalog/schema/table**
 - One catalog: `chip_lakehouse`. Schema names are single lowercase words matching the layer (`bronze`, `silver`, `gold`, `ml`).
-- Table names are plural, snake_case, and identical across layers for the same entity (`bronze.accounts` → `silver.accounts`) - a table renamed between layers is a sign the transform is doing more than cleaning (see Layer contracts above).
+- Table names are plural, snake_case, and identical across layers for the same entity (`bronze.accounts` → `silver.accounts`) - a table renamed between layers is a sign the transform is doing more than cleaning (see Layer contracts above). The one exception is a reference/lookup table introduced purely to normalize a column (`silver.account_types`, `silver.transaction_types`): it has no bronze counterpart to match names with, because it isn't a source entity at all.
 
 **Columns**
 - snake_case throughout, no abbreviations that aren't already domain-standard (`iban` would be fine; `acct_no` would not).
-- Primary keys: `<entity_singular>_id` (`user_id`, `account_id`, `transaction_id`, `goal_id`) - always a UUID string, generated at source, never a database-assigned surrogate.
+- Primary keys: `<entity_singular>_id` (`user_id`, `account_id`, `transaction_id`, `goal_id`) - for entity tables, always a UUID string, generated at source, never a database-assigned surrogate.
+- Reference/lookup tables are the carve-out to that rule: `silver.account_types` and `silver.transaction_types` use small hardcoded integer surrogate keys (`account_type_id`, `transaction_type_id`). The UUID rule exists to keep keys stable and source-owned rather than assigned by whichever database happened to load the row first - but these tables are tiny, static, code-known enumerations seeded from a literal list in [silver_transform.py](../src/silver_transform.py), not database-assigned sequences, so the failure mode it guards against can't arise. A readable `1`/`2`/`3` beats a UUID on a table a human reads directly.
 - Pipeline metadata columns are prefixed with `_` and never carry business meaning (`_ingested_at`). Purely transient columns used mid-transform and dropped before write are also `_`-prefixed (e.g. `_rn` in `dedupe_latest`) so they're unmistakable if one ever leaks into an output by accident.
 - A column that has been transformed away from its bronze meaning gets a new name that says so, rather than silently changing what the same name means between layers: `account_number` (full IBAN, bronze) becomes `account_number_masked` (last 4 digits, silver), `date_of_birth` (exact date, bronze) becomes `age_band` (10-year bucket, silver). If you can `SELECT column_name FROM bronze... UNION ALL SELECT column_name FROM silver...` and get two different *kinds* of data back, the column needs two different names.
 
@@ -89,7 +90,8 @@ would otherwise surface confusingly far from its actual cause.
 **2. Runtime quarantine, built into the pipeline itself** ([silver_transform.py](../src/silver_transform.py))
 Not a separate test suite - a property of the transform functions themselves.
 Every FK is validated via `left_semi`/`left_anti` joins against the (already
-clean) silver parent, and every category column against its known enum. Rows
+clean) silver parent, and every category column against its lookup table
+(`account_type` → `silver.account_types`, and likewise for transactions). Rows
 that fail are written to `data/quarantine/<table>_<reason>/` rather than
 silently dropped or allowed through - a bad row becomes a visible, inspectable
 artifact instead of a mystery discovered three layers later. This is the
@@ -105,15 +107,17 @@ to be formalized here as actual pytest cases):
 
 ```python
 def test_transform_accounts_quarantines_bad_type_and_orphans(spark):
+    account_types = build_account_types(spark)
     silver_users = spark.createDataFrame([Row(user_id="u1")])
     bronze_accounts = spark.createDataFrame([
         Row(account_id="a1", user_id="u1", account_type="savings", ...),        # valid
-        Row(account_id="a2", user_id="u1", account_type="BOGUS", ...),          # bad enum
+        Row(account_id="a2", user_id="u1", account_type="BOGUS", ...),          # no lookup row
         Row(account_id="a3", user_id="ORPHAN", account_type="savings", ...),    # bad FK
     ])
-    result = transform_accounts(bronze_accounts, silver_users)
+    result = transform_accounts(bronze_accounts, silver_users, account_types)
     assert result.count() == 1
     assert result.collect()[0]["account_id"] == "a1"
+    assert result.collect()[0]["account_type_id"] == 1  # "savings", resolved via the lookup
 ```
 
 Every transform function should have at least: one happy-path case, one

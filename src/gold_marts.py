@@ -31,6 +31,7 @@ from pyspark.sql.types import DecimalType
 from spark_session import CATALOG_NAME, get_spark, load_uc_token
 from uc_delta import write_delta_table
 
+
 def zero_decimal():
     # Built lazily, not at module import time - F.lit() needs an active
     # SparkSession, which doesn't exist yet when this module is imported.
@@ -56,6 +57,10 @@ def build_account_summary(
     # direction now lives in silver.transaction_types, not a Python list -
     # this is the actual point of the Inmon refactor: the business rule
     # that used to be INFLOW_TRANSACTION_TYPES in code is now governed data.
+    #
+    # The inner join can't silently drop a transaction: transform_transactions()
+    # only emits rows whose transaction_type_id it resolved from this same
+    # lookup table, so the FK is valid by construction.
     txn_with_direction = silver_transactions.join(
         transaction_types.select("transaction_type_id", "direction"), "transaction_type_id", "inner"
     )
@@ -71,6 +76,9 @@ def build_account_summary(
     # silver normalizes account_type for governance; gold resolves it back
     # to a readable label for consumption - that's gold's job per
     # docs/standard.md's layer contract.
+    #
+    # Inner join again, safe for the same reason: transform_accounts() derives
+    # account_type_id from this lookup table, so no account is dropped here.
     accounts_with_label = silver_accounts.join(
         account_types.select("account_type_id", F.col("type_name").alias("account_type")),
         "account_type_id",
