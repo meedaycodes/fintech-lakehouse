@@ -6,7 +6,7 @@ from pyspark.sql import functions as F
 
 import silver_transform
 from gold_marts import build_account_summary
-from gold_star import build_dim_date, build_dim_transaction_type
+from gold_star import build_dim_date, build_dim_transaction_type, plan_scd2
 from silver_transform import (
     build_account_types,
     build_transaction_types,
@@ -253,3 +253,77 @@ def test_build_dim_transaction_type_passthrough(spark):
         for r in build_dim_transaction_type(stt).collect()
     }
     assert out == {1: "inflow", 2: "outflow"}
+
+
+_C_ARGS = dict(
+    business_key="user_id",
+    tracked_cols=["age_band", "signup_date"],
+    effective_from_col="signup_date",
+    surrogate_key="customer_key",
+)
+
+
+def _seed(spark, rows):
+    incoming = spark.createDataFrame(rows, ["user_id", "age_band", "signup_date"])
+    inserts, _ = plan_scd2(incoming, None, run_date=date(2026, 1, 1), **_C_ARGS)
+    return inserts
+
+
+def test_plan_scd2_initial_load_all_current(spark):
+    incoming = spark.createDataFrame(
+        [("u2", "30-39", date(2022, 1, 1)), ("u1", "20-29", date(2021, 6, 1))],
+        ["user_id", "age_band", "signup_date"],
+    )
+    inserts, expire = plan_scd2(incoming, None, run_date=date(2026, 9, 6), **_C_ARGS)
+
+    assert expire.count() == 0
+    rows = {r["user_id"]: r for r in inserts.collect()}
+    assert rows["u1"]["customer_key"] == 1  # keyed in business-key order
+    assert rows["u2"]["customer_key"] == 2
+    assert all(r["is_current"] for r in rows.values())
+    assert all(r["valid_to"] == date(9999, 12, 31) for r in rows.values())
+    assert rows["u1"]["valid_from"] == date(2021, 6, 1)
+    assert rows["u1"]["signup_date"] == date(2021, 6, 1)  # attribute retained too
+    assert rows["u1"]["row_hash"] != rows["u2"]["row_hash"]
+
+
+def test_plan_scd2_unchanged_is_noop(spark):
+    seed = _seed(spark, [("u1", "20-29", date(2021, 6, 1))])
+    incoming = spark.createDataFrame(
+        [("u1", "20-29", date(2021, 6, 1))], ["user_id", "age_band", "signup_date"]
+    )
+    inserts, expire = plan_scd2(incoming, seed, run_date=date(2026, 9, 6), **_C_ARGS)
+    assert inserts.count() == 0
+    assert expire.count() == 0
+
+
+def test_plan_scd2_changed_attribute_versions(spark):
+    seed = _seed(spark, [("u1", "20-29", date(2021, 6, 1))])
+    v2 = spark.createDataFrame(
+        [("u1", "30-39", date(2021, 6, 1))], ["user_id", "age_band", "signup_date"]
+    )
+    inserts, expire = plan_scd2(v2, seed, run_date=date(2026, 9, 6), **_C_ARGS)
+
+    assert [r["user_id"] for r in expire.collect()] == ["u1"]
+    ins = inserts.collect()
+    assert len(ins) == 1
+    assert ins[0]["customer_key"] == 2  # max existing key (1) + 1
+    assert ins[0]["age_band"] == "30-39"
+    assert ins[0]["valid_from"] == date(2026, 9, 6)  # run_date, not signup_date
+    assert ins[0]["is_current"]
+
+
+def test_plan_scd2_new_business_key_inserts(spark):
+    seed = _seed(spark, [("u1", "20-29", date(2021, 6, 1))])
+    v2 = spark.createDataFrame(
+        [("u1", "20-29", date(2021, 6, 1)), ("u2", "40-49", date(2023, 3, 1))],
+        ["user_id", "age_band", "signup_date"],
+    )
+    inserts, expire = plan_scd2(v2, seed, run_date=date(2026, 9, 6), **_C_ARGS)
+
+    assert expire.count() == 0
+    ins = inserts.collect()
+    assert len(ins) == 1
+    assert ins[0]["user_id"] == "u2"
+    assert ins[0]["customer_key"] == 2
+    assert ins[0]["valid_from"] == date(2023, 3, 1)  # effective_from, not run_date

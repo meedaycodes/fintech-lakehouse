@@ -90,3 +90,86 @@ def silver_date_bounds(silver_users, silver_accounts, silver_transactions) -> tu
         F.last_day(F.max("d")).alias("end"),
     ).first()
     return row["start"], row["end"]
+
+
+def _scd2_open():
+    # Lazy: F.lit needs an active SparkContext, so it can't be a module constant.
+    return F.lit(date(9999, 12, 31)).cast("date")
+
+
+def _row_hash(tracked_cols: list[str]):
+    parts = [
+        F.coalesce(F.col(c).cast("string"), F.lit("∅")) for c in sorted(tracked_cols)
+    ]
+    return F.sha2(F.concat_ws("||", *parts), 256)
+
+
+def plan_scd2(
+    incoming: DataFrame,
+    current_target: "DataFrame | None",
+    *,
+    business_key: str,
+    tracked_cols: list[str],
+    effective_from_col: str,
+    surrogate_key: str,
+    run_date: date,
+) -> "tuple[DataFrame, DataFrame]":
+    """Decide the SCD2 delta. Pure - no I/O. `incoming` must be one row
+    per business_key. See the plan's Task 3 interface block for the
+    output schema.
+    """
+    carry = list(incoming.columns)  # every attribute stays; valid_from is derived, not moved
+    hashed = incoming.withColumn("row_hash", _row_hash(tracked_cols))
+
+    def _finalize(df, key_col, valid_from_col):
+        return df.select(
+            key_col.alias(surrogate_key),
+            *carry,
+            "row_hash",
+            valid_from_col.alias("valid_from"),
+            _scd2_open().alias("valid_to"),
+            F.lit(True).alias("is_current"),
+        )
+
+    if current_target is None:
+        w = Window.orderBy(business_key)
+        inserts = _finalize(
+            hashed, F.row_number().over(w), F.col(effective_from_col).cast("date")
+        )
+        expire = hashed.select(F.col(business_key)).where(F.lit(False))
+        return inserts, expire
+
+    max_key = current_target.agg(
+        F.coalesce(F.max(surrogate_key), F.lit(0)).alias("m")
+    ).first()["m"]
+    cur_keys = (
+        current_target.select(business_key).distinct().withColumn("_exists", F.lit(True))
+    )
+    cur_open_hash = (
+        current_target.where(F.col("is_current"))
+        .select(business_key, F.col("row_hash").alias("_cur_hash"))
+    )
+    tagged = hashed.join(cur_keys, business_key, "left").join(
+        cur_open_hash, business_key, "left"
+    )
+
+    new_or_changed = tagged.where(
+        F.col("_exists").isNull() | (F.col("row_hash") != F.col("_cur_hash"))
+    ).withColumn(
+        "_valid_from",
+        F.when(
+            F.col("_exists").isNull(), F.col(effective_from_col).cast("date")
+        ).otherwise(F.lit(run_date).cast("date")),
+    )
+    w = Window.orderBy(business_key, "_valid_from")
+    inserts = _finalize(
+        new_or_changed, F.lit(max_key) + F.row_number().over(w), F.col("_valid_from")
+    )
+    expire = (
+        tagged.where(
+            F.col("_exists").isNotNull() & (F.col("row_hash") != F.col("_cur_hash"))
+        )
+        .select(business_key)
+        .distinct()
+    )
+    return inserts, expire
