@@ -308,3 +308,130 @@ def build_fct_transaction(
         .alias("signed_amount"),
         "currency",
     )
+
+
+def build_fct_account_monthly_snapshot(
+    silver_transactions: DataFrame,
+    silver_accounts: DataFrame,
+    silver_transaction_types: DataFrame,
+    dim_customer: DataFrame,
+    dim_account: DataFrame,
+) -> DataFrame:
+    zero = F.lit(0).cast("decimal(12,2)")
+    direction = silver_transaction_types.select("transaction_type_id", "direction")
+    txn = (
+        silver_transactions.join(direction, "transaction_type_id", "inner")
+        .withColumn("_d", F.to_date("transaction_ts"))
+        .withColumn("_m", F.trunc("_d", "month"))
+        .withColumn(
+            "_signed",
+            F.when(F.col("direction") == "inflow", F.col("amount"))
+            .otherwise(-F.col("amount"))
+            .cast("decimal(12,2)"),
+        )
+    )
+
+    max_month = txn.agg(F.trunc(F.max("_d"), "month").alias("mm")).first()["mm"]
+
+    spine = (
+        silver_accounts.select("account_id", "user_id", "opened_date")
+        .withColumn("_start", F.trunc("opened_date", "month"))
+        .withColumn(
+            "_month",
+            F.explode(
+                F.sequence(F.col("_start"), F.lit(max_month), F.expr("interval 1 month"))
+            ),
+        )
+        .withColumn("_month_end", F.last_day("_month"))
+        .withColumn("date_key", _date_key(F.col("_month_end")))
+        .select("account_id", "user_id", "_month", "_month_end", "date_key")
+    )
+
+    month_agg = txn.groupBy("account_id", "_m").agg(
+        F.coalesce(F.sum(F.when(F.col("direction") == "inflow", F.col("amount"))), zero)
+        .cast("decimal(12,2)")
+        .alias("month_inflow"),
+        F.coalesce(F.sum(F.when(F.col("direction") == "outflow", F.col("amount"))), zero)
+        .cast("decimal(12,2)")
+        .alias("month_outflow"),
+        F.count(F.lit(1)).alias("transaction_count"),
+    )
+
+    # closing balance: sum of every signed txn for the account dated on or
+    # before this spine row's month end.
+    closing = (
+        spine.join(
+            txn.select(
+                F.col("account_id").alias("_ta"), F.col("_d").alias("_td"), "_signed"
+            ),
+            (spine["account_id"] == F.col("_ta")) & (F.col("_td") <= spine["_month_end"]),
+            "left",
+        )
+        .groupBy(
+            spine["account_id"], spine["user_id"], spine["_month"],
+            spine["_month_end"], spine["date_key"],
+        )
+        .agg(F.coalesce(F.sum("_signed"), zero).cast("decimal(12,2)").alias("closing_balance"))
+    )
+
+    combined = (
+        closing.join(
+            month_agg,
+            (closing["account_id"] == month_agg["account_id"])
+            & (closing["_month"] == month_agg["_m"]),
+            "left",
+        )
+        .select(
+            closing["account_id"].alias("account_id"),
+            closing["user_id"].alias("user_id"),
+            closing["_month_end"].alias("_month_end"),
+            closing["date_key"].alias("date_key"),
+            "closing_balance",
+            F.coalesce(F.col("month_inflow"), zero).alias("month_inflow"),
+            F.coalesce(F.col("month_outflow"), zero).alias("month_outflow"),
+            F.coalesce(F.col("transaction_count"), F.lit(0)).alias("transaction_count"),
+        )
+        .withColumn(
+            "month_net",
+            (F.col("month_inflow") - F.col("month_outflow")).cast("decimal(12,2)"),
+        )
+    )
+
+    acct = dim_account.select(
+        "account_key",
+        F.col("account_id").alias("_ba"),
+        F.col("valid_from").alias("_af"),
+        F.col("valid_to").alias("_at"),
+    )
+    cust = dim_customer.select(
+        "customer_key",
+        F.col("user_id").alias("_bu"),
+        F.col("valid_from").alias("_cf"),
+        F.col("valid_to").alias("_ct"),
+    )
+    return (
+        combined.join(
+            acct,
+            (combined["account_id"] == acct["_ba"])
+            & (combined["_month_end"] >= acct["_af"])
+            & (combined["_month_end"] < acct["_at"]),
+            "inner",
+        )
+        .join(
+            cust,
+            (combined["user_id"] == cust["_bu"])
+            & (combined["_month_end"] >= cust["_cf"])
+            & (combined["_month_end"] < cust["_ct"]),
+            "inner",
+        )
+        .select(
+            "date_key",
+            "customer_key",
+            "account_key",
+            "month_inflow",
+            "month_outflow",
+            "month_net",
+            "closing_balance",
+            "transaction_count",
+        )
+    )

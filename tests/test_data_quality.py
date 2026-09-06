@@ -10,6 +10,7 @@ from gold_star import (
     _delta_log_exists,
     build_dim_date,
     build_dim_transaction_type,
+    build_fct_account_monthly_snapshot,
     build_fct_transaction,
     plan_scd2,
 )
@@ -412,3 +413,45 @@ def test_build_fct_transaction_row_count_preserved(spark):
     dc = _dim_customer_row(spark, [(20, "u1", date(2019, 1, 1), date(9999, 12, 31))])
 
     assert build_fct_transaction(st, stt, dc, da).count() == 7
+
+
+def test_build_fct_account_monthly_snapshot_running_balance_and_gap(spark):
+    stt = spark.createDataFrame(
+        [(1, "inflow"), (2, "outflow")], ["transaction_type_id", "direction"]
+    )
+    st = _txns(spark, [
+        ("t1", "a1", 1, Decimal("100.00"), "GBP", "2026-01-15 10:00:00"),  # Jan
+        ("t2", "a1", 2, Decimal("30.00"), "GBP", "2026-03-10 10:00:00"),   # Mar; Feb empty
+    ])
+    sa = spark.createDataFrame(
+        [("a1", "u1", date(2026, 1, 1))], ["account_id", "user_id", "opened_date"]
+    )
+    da = _dim_account_row(spark, [(10, "a1", "u1", date(2020, 1, 1), date(9999, 12, 31))])
+    dc = _dim_customer_row(spark, [(20, "u1", date(2019, 1, 1), date(9999, 12, 31))])
+
+    rows = {
+        r["date_key"]: r
+        for r in build_fct_account_monthly_snapshot(st, sa, stt, dc, da).collect()
+    }
+    assert set(rows) == {20260131, 20260228, 20260331}
+    assert rows[20260131]["closing_balance"] == Decimal("100.00")
+    assert rows[20260228]["closing_balance"] == Decimal("100.00")  # gap month carries forward
+    assert rows[20260228]["transaction_count"] == 0
+    assert rows[20260331]["closing_balance"] == Decimal("70.00")
+    assert rows[20260331]["month_outflow"] == Decimal("30.00")
+    assert rows[20260331]["month_net"] == Decimal("-30.00")
+    assert rows[20260131]["customer_key"] == 20 and rows[20260131]["account_key"] == 10
+
+
+def test_build_fct_account_monthly_snapshot_month_end_date_key(spark):
+    stt = spark.createDataFrame([(1, "inflow")], ["transaction_type_id", "direction"])
+    st = _txns(spark, [("t1", "a1", 1, Decimal("50.00"), "GBP", "2026-04-20 10:00:00")])
+    sa = spark.createDataFrame(
+        [("a1", "u1", date(2026, 4, 1))], ["account_id", "user_id", "opened_date"]
+    )
+    da = _dim_account_row(spark, [(10, "a1", "u1", date(2020, 1, 1), date(9999, 12, 31))])
+    dc = _dim_customer_row(spark, [(20, "u1", date(2019, 1, 1), date(9999, 12, 31))])
+
+    out = build_fct_account_monthly_snapshot(st, sa, stt, dc, da).collect()
+    assert len(out) == 1
+    assert out[0]["date_key"] == 20260430  # April month-end
