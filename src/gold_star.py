@@ -70,6 +70,15 @@ def build_dim_date(spark, start: date, end: date) -> DataFrame:
     )
 
 
+def build_dim_transaction_type(silver_transaction_types: DataFrame) -> DataFrame:
+    return silver_transaction_types.select(
+        F.col("transaction_type_id").alias("transaction_type_key"),
+        "type_name",
+        "direction",
+        "description",
+    )
+
+
 def silver_date_bounds(silver_users, silver_accounts, silver_transactions) -> tuple[date, date]:
     dates = (
         silver_transactions.select(F.to_date("transaction_ts").alias("d"))

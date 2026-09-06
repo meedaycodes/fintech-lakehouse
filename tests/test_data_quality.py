@@ -6,7 +6,7 @@ from pyspark.sql import functions as F
 
 import silver_transform
 from gold_marts import build_account_summary
-from gold_star import build_dim_date
+from gold_star import build_dim_date, build_dim_transaction_type
 from silver_transform import (
     build_account_types,
     build_transaction_types,
@@ -241,3 +241,15 @@ def test_build_dim_date_spans_and_flags(spark):
     assert rows[20240106]["is_weekend"]
     assert rows[20240108]["day_of_week"] == 1
     assert not rows[20240108]["is_weekend"]
+
+
+def test_build_dim_transaction_type_passthrough(spark):
+    stt = spark.createDataFrame(
+        [(1, "deposit", "inflow", "d"), (2, "withdrawal", "outflow", "w")],
+        ["transaction_type_id", "type_name", "direction", "description"],
+    )
+    out = {
+        r["transaction_type_key"]: r["direction"]
+        for r in build_dim_transaction_type(stt).collect()
+    }
+    assert out == {1: "inflow", 2: "outflow"}
