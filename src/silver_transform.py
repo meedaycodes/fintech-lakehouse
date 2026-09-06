@@ -42,6 +42,36 @@ QUARANTINE_DIR = Path(__file__).resolve().parent.parent / "data" / "quarantine"
 ACCOUNT_TYPES = ["savings", "investment", "pension"]
 TRANSACTION_TYPES = ["deposit", "withdrawal", "roundup", "investment_contribution"]
 
+# Inmon-style lookup tables (silver.account_types, silver.transaction_types).
+# Hardcoded, not derived from data - these are small, closed, code-known
+# enumerations. direction drives gold_marts.py's inflow/outflow
+# classification; it must reproduce today's INFLOW_TRANSACTION_TYPES list
+# exactly (deposit/roundup/investment_contribution = inflow).
+ACCOUNT_TYPE_SEED = [
+    (1, "savings", "cash", "Instant/easy-access cash savings account"),
+    (2, "investment", "investment", "Stocks & shares investment account"),
+    (3, "pension", "retirement", "Personal pension account"),
+]
+
+TRANSACTION_TYPE_SEED = [
+    (1, "deposit", "inflow", "Manual deposit into the account"),
+    (2, "withdrawal", "outflow", "Withdrawal out of the account"),
+    (3, "roundup", "inflow", "Spare change swept in from a linked card purchase"),
+    (4, "investment_contribution", "inflow", "Contribution into an investment sub-account"),
+]
+
+
+def build_account_types(spark) -> DataFrame:
+    return spark.createDataFrame(
+        ACCOUNT_TYPE_SEED, schema=["account_type_id", "type_name", "category", "description"]
+    )
+
+
+def build_transaction_types(spark) -> DataFrame:
+    return spark.createDataFrame(
+        TRANSACTION_TYPE_SEED, schema=["transaction_type_id", "type_name", "direction", "description"]
+    )
+
 
 def bronze_table(spark, name: str) -> DataFrame:
     return spark.table(f"{CATALOG_NAME}.bronze.{name}")
@@ -149,6 +179,14 @@ def transform_savings_goals(bronze_goals: DataFrame, silver_users: DataFrame) ->
 if __name__ == "__main__":
     spark = get_spark()
     token = load_uc_token()
+
+    account_types = build_account_types(spark)
+    write_delta_table(token, account_types, "silver", "account_types")
+    print(f"silver.account_types: {account_types.count()} rows")
+
+    transaction_types = build_transaction_types(spark)
+    write_delta_table(token, transaction_types, "silver", "transaction_types")
+    print(f"silver.transaction_types: {transaction_types.count()} rows")
 
     silver_users = transform_users(bronze_table(spark, "users"))
     write_delta_table(token, silver_users, "silver", "users")
