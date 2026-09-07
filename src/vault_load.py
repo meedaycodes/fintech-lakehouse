@@ -70,3 +70,13 @@ def add_hash_key(df: DataFrame, bk_cols: list, hk_col: str) -> DataFrame:
 def add_hash_diff(df: DataFrame, attr_cols: list, out_col: str = "hash_diff") -> DataFrame:
     """Adds out_col = _hash of attr_cols in sorted-by-name order (not trimmed)."""
     return df.withColumn(out_col, _hash(*[F.col(c) for c in sorted(attr_cols)]))
+
+
+def new_rows_by_key(
+    incoming: DataFrame, existing: "DataFrame | None", key_col: str
+) -> DataFrame:
+    """Rows of incoming (one per key_col) whose key_col is not in existing."""
+    incoming = incoming.dropDuplicates([key_col])
+    if existing is None:
+        return incoming
+    return incoming.join(existing.select(key_col), key_col, "left_anti")

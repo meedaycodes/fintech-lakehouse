@@ -20,7 +20,7 @@ from silver_transform import (
     transform_accounts,
     transform_transactions,
 )
-from vault_load import add_hash_diff, add_hash_key, _hash
+from vault_load import add_hash_diff, add_hash_key, _hash, new_rows_by_key
 
 
 def test_build_account_types_has_expected_rows(spark):
@@ -503,3 +503,26 @@ def test_add_hash_diff_is_column_order_independent(spark):
     row2 = add_hash_diff(df, ["b", "a"]).first()
     assert row["hash_diff"] == row2["hash_diff"]  # sorted() by name, so arg order is irrelevant
     assert len(row["hash_diff"]) == 64
+
+
+def test_new_rows_by_key_first_load_returns_all_once(spark):
+    incoming = spark.createDataFrame(
+        [("hk1", "u1"), ("hk2", "u2"), ("hk1", "u1")], ["user_hk", "user_id"]
+    )
+    out = new_rows_by_key(incoming, None, "user_hk")
+    assert sorted(r["user_hk"] for r in out.collect()) == ["hk1", "hk2"]
+
+
+def test_new_rows_by_key_returns_only_unseen(spark):
+    incoming = spark.createDataFrame(
+        [("hk1", "u1"), ("hk2", "u2"), ("hk3", "u3")], ["user_hk", "user_id"]
+    )
+    existing = spark.createDataFrame([("hk1",), ("hk2",)], ["user_hk"])
+    out = new_rows_by_key(incoming, existing, "user_hk")
+    assert [r["user_hk"] for r in out.collect()] == ["hk3"]
+
+
+def test_new_rows_by_key_all_seen_is_empty(spark):
+    incoming = spark.createDataFrame([("hk1", "u1")], ["user_hk", "user_id"])
+    existing = spark.createDataFrame([("hk1",)], ["user_hk"])
+    assert new_rows_by_key(incoming, existing, "user_hk").count() == 0
