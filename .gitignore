@@ -40,3 +40,6 @@ infra/*.tfstate.*
 # Test / coverage artifacts
 .pytest_cache/
 .coverage
+
+# Personal study notes - not part of the project deliverable
+/THEORY.md
