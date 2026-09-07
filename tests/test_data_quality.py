@@ -20,6 +20,7 @@ from silver_transform import (
     transform_accounts,
     transform_transactions,
 )
+from vault_load import add_hash_diff, add_hash_key, _hash
 
 
 def test_build_account_types_has_expected_rows(spark):
@@ -474,3 +475,31 @@ def test_build_fct_account_monthly_snapshot_account_opened_after_last_txn_month(
     assert out[0]["transaction_count"] == 0
     assert out[0]["month_inflow"] == Decimal("0.00")
     assert out[0]["closing_balance"] == Decimal("0.00")
+
+
+def test_hash_is_deterministic_and_order_sensitive(spark):
+    df = spark.createDataFrame([("a", "b")], ["x", "y"])
+    got = df.select(
+        _hash(F.col("x"), F.col("y")).alias("xy"),
+        _hash(F.col("y"), F.col("x")).alias("yx"),
+        _hash(F.col("x"), F.col("y")).alias("xy2"),
+    ).first()
+    assert got["xy"] == got["xy2"]          # deterministic
+    assert got["xy"] != got["yx"]           # order matters
+    assert len(got["xy"]) == 64             # sha-256 hex
+
+
+def test_add_hash_key_trims_business_key(spark):
+    df = spark.createDataFrame([("  u1  ", "u1")], ["padded", "clean"])
+    out = add_hash_key(df, ["clean"], "clean_hk")
+    out = add_hash_key(out.withColumnRenamed("padded", "bk"), ["bk"], "padded_hk")
+    row = out.first()
+    assert row["clean_hk"] == row["padded_hk"]   # trim makes them equal
+
+
+def test_add_hash_diff_is_column_order_independent(spark):
+    df = spark.createDataFrame([("x", "y")], ["b", "a"])
+    row = add_hash_diff(df, ["a", "b"]).first()
+    row2 = add_hash_diff(df, ["b", "a"]).first()
+    assert row["hash_diff"] == row2["hash_diff"]  # sorted() by name, so arg order is irrelevant
+    assert len(row["hash_diff"]) == 64

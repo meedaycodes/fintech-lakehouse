@@ -67,5 +67,5 @@ def get_spark(app_name = "chip-lakehouse"):
 if __name__ == "__main__":
     ensure_uc_catalog()
     spark = get_spark()
-    for schema in ["bronze", "silver", "gold", "ml"]:
+    for schema in ["bronze", "silver", "gold", "ml", "vault"]:
         spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG_NAME}.{schema}")

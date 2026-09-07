@@ -21,6 +21,7 @@ users:
       silver: [USE SCHEMA, CREATE TABLE, SELECT, MODIFY]
       gold: [USE SCHEMA, CREATE TABLE, SELECT, MODIFY]
       ml: [USE SCHEMA, CREATE TABLE, SELECT, MODIFY]
+      vault: [USE SCHEMA, CREATE TABLE, SELECT, MODIFY]
 
   - email: data-analyst@chip-lakehouse.local
     name: Data Analyst
