@@ -111,3 +111,109 @@ def changed_sat_rows(
 def current_sat(sat: DataFrame, key_col: str) -> DataFrame:
     """One row per key_col - the greatest load_date (ties broken by hash_diff)."""
     return _latest_by_load_date(sat, key_col)
+
+
+# (hub table, bronze table, business key, hash-key column)
+HUBS = [
+    ("hub_user", "users", "user_id", "user_hk"),
+    ("hub_account", "accounts", "account_id", "account_hk"),
+    ("hub_transaction", "transactions", "transaction_id", "transaction_hk"),
+    ("hub_savings_goal", "savings_goals", "goal_id", "savings_goal_hk"),
+]
+
+# (link table, bronze table, [(business key, its hub-key column), ...] in
+# hash order, link hash-key column). The first pair's business key is the
+# child entity's PK - used to dedupe the bronze rows.
+LINKS = [
+    ("link_account_user", "accounts",
+     [("account_id", "account_hk"), ("user_id", "user_hk")], "account_user_hk"),
+    ("link_transaction_account", "transactions",
+     [("transaction_id", "transaction_hk"), ("account_id", "account_hk")],
+     "transaction_account_hk"),
+    ("link_savings_goal_user", "savings_goals",
+     [("goal_id", "savings_goal_hk"), ("user_id", "user_hk")], "savings_goal_user_hk"),
+]
+
+# (sat table, bronze table, business key, hub-key column, [attribute cols],
+# {attribute col: cast type}). Attributes not in the cast map land as
+# bronze inferred them.
+SATS = [
+    ("sat_user_details", "users", "user_id", "user_hk",
+     ["date_of_birth", "signup_date"],
+     {"date_of_birth": "date", "signup_date": "date"}),
+    ("sat_account_details", "accounts", "account_id", "account_hk",
+     ["account_type", "account_number", "opened_date"],
+     {"opened_date": "date"}),
+    ("sat_transaction_details", "transactions", "transaction_id", "transaction_hk",
+     ["transaction_type", "amount", "currency", "transaction_ts"],
+     {"amount": "decimal(10,2)", "transaction_ts": "timestamp"}),
+    ("sat_savings_goal_details", "savings_goals", "goal_id", "savings_goal_hk",
+     ["goal_name", "target_amount", "current_amount", "created_date", "target_date"],
+     {"target_amount": "decimal(10,2)", "current_amount": "decimal(10,2)",
+      "created_date": "date", "target_date": "date"}),
+]
+
+
+def _write(spark, token, delta: DataFrame, name: str, first_load: bool) -> int:
+    n = delta.count()
+    if first_load:
+        write_delta_table(token, delta, "vault", name, mode="overwrite")
+    elif n > 0:
+        write_delta_table(token, delta, "vault", name, mode="append")
+    total = spark.table(f"{CATALOG_NAME}.vault.{name}").count()
+    print(f"vault.{name}: +{n} rows ({total} total)")
+    return n
+
+
+if __name__ == "__main__":
+    spark = get_spark()
+    token = load_uc_token()
+    LOAD_DATE = datetime.now()
+
+    def _load_date_col():
+        return F.lit(LOAD_DATE).cast("timestamp")
+
+    # --- reference tables (closed lists, plain overwrite) ---
+    write_delta_table(token, build_account_types(spark), "vault", "ref_account_type")
+    write_delta_table(token, build_transaction_types(spark), "vault", "ref_transaction_type")
+    print("vault.ref_account_type / vault.ref_transaction_type: seeded")
+
+    # --- hubs ---
+    for hub, btbl, bk, hk in HUBS:
+        b = dedupe_latest(bronze_table(spark, btbl), [bk])
+        incoming = add_hash_key(b, [bk], hk).select(
+            hk, bk,
+            _load_date_col().alias("load_date"),
+            F.lit(f"bronze.{btbl}").alias("record_source"),
+        )
+        existing = vault_table(spark, token, hub)
+        _write(spark, token, new_rows_by_key(incoming, existing, hk), hub, existing is None)
+
+    # --- links ---
+    for link, btbl, pairs, link_hk in LINKS:
+        child_bk = pairs[0][0]
+        b = dedupe_latest(bronze_table(spark, btbl), [child_bk])
+        for bk, hk in pairs:
+            b = add_hash_key(b, [bk], hk)
+        b = add_hash_key(b, [pair[0] for pair in pairs], link_hk)
+        incoming = b.select(
+            link_hk, *[hk for _, hk in pairs],
+            _load_date_col().alias("load_date"),
+            F.lit(f"bronze.{btbl}").alias("record_source"),
+        )
+        existing = vault_table(spark, token, link)
+        _write(spark, token, new_rows_by_key(incoming, existing, link_hk), link, existing is None)
+
+    # --- satellites ---
+    for sat, btbl, bk, hk, attrs, casts in SATS:
+        b = dedupe_latest(bronze_table(spark, btbl), [bk])
+        b = add_hash_key(b, [bk], hk)
+        for c, t in casts.items():
+            b = b.withColumn(c, F.col(c).cast(t))
+        b = add_hash_diff(b, attrs)
+        incoming = b.select(
+            hk, _load_date_col().alias("load_date"), "hash_diff",
+            F.lit(f"bronze.{btbl}").alias("record_source"), *attrs,
+        )
+        existing = vault_table(spark, token, sat)
+        _write(spark, token, changed_sat_rows(incoming, existing, hk), sat, existing is None)
