@@ -6,7 +6,7 @@ partitioning, and testing.
 
 ## Layer contracts
 
-Four schemas under the `chip_lakehouse` catalog, each with a distinct contract.
+Five schemas under the `chip_lakehouse` catalog, each with a distinct contract.
 A table only moves to the next layer once it satisfies the current one - the
 point is that each layer's guarantees are absolute, not "usually true."
 
@@ -15,6 +15,7 @@ point is that each layer's guarantees are absolute, not "usually true."
 | `bronze` | Raw, as close to source shape as possible. Schema-inferred, not hand-typed. Tagged with `_ingested_at`. No cleaning, no dedup, no PII handling. | [bronze_ingest.py](../src/bronze_ingest.py) |
 | `silver` | Deduplicated (one row per primary key), explicitly typed, every FK referentially valid, direct identifiers removed. Still one-to-one with bronze entities - no joins, no aggregation - apart from reference/lookup tables added to normalize a category column (see Naming conventions). | [silver_transform.py](../src/silver_transform.py) |
 | `gold` | Business-level marts: joined, aggregated, dimensional. Consumers (dashboards, analysts) query gold, not silver, for anything beyond raw entity lookups. | [gold_marts.py](../src/gold_marts.py), [gold_star.py](../src/gold_star.py) |
+| `vault` | Data Vault 2.0 raw layer: insert-only hubs / links / satellites, hash-keyed, source-tagged, never updated in place. A parallel branch off `bronze`, not a stage before `silver`. Keeps the full history `bronze` overwrites and `silver` dedupes away. | [vault_load.py](../src/vault_load.py) |
 | `ml` | Model-ready feature tables, built from silver/gold. | [ml_train_register.py](../src/ml_train_register.py) (pending) |
 
 The `gold` schema holds two shapes side by side: pre-aggregated wide
@@ -28,6 +29,27 @@ single, auditable place where every cleaning decision is made once. Don't
 backfill cleaning logic into bronze, and don't skip silver by joining bronze
 tables directly in gold.
 
+The `vault` schema is a second, independent branch off `bronze`, built by
+`vault_load.py` and reconciled to `silver` by `tests/verify_e2e.py`. It
+exists for what neither `bronze` nor `silver` keeps:
+
+- **Non-destructive history.** `bronze` is full-overwrite; `silver`
+  dedupes to one row per key. Vault satellites are insert-only, keyed
+  `(hub_hk, load_date)`, and a new version lands only when the tracked
+  attributes' `hash_diff` changes — so every past state is still there.
+- **Provenance.** `record_source` and `load_date` on every hub, link and
+  satellite row record which load each came from.
+- **Resilience to source change.** A new source attribute is a new
+  satellite; a new relationship is a new link. Hubs and existing
+  satellites never change and need no reload.
+- **Deterministic keys.** A hub key is `sha2` of the business key —
+  identical every run, no lookup — and links are built by hashing their
+  parents' keys, not by joining.
+
+"Current" is not stored; it is derived at query time (`current_sat`:
+newest `load_date` per hub key). The vault never re-points `silver`; the
+two coexist.
+
 ## Naming conventions
 
 **Catalog/schema/table**
@@ -38,6 +60,11 @@ tables directly in gold.
   carries a shape prefix - the star schema is a deliberate second
   modelling style layered over the same silver, and the prefix is how a
   consumer tells a conformed dimension from a wide mart at a glance.
+- Data Vault tables in `vault` are prefixed `hub_` (business-key list),
+  `link_` (relationship), `sat_` (attribute history) or `ref_`
+  (seeded reference list). Like `dim_` / `fct_`, this is a deliberate
+  second modelling style over the same source, and the prefix names the
+  construct.
 
 **Columns**
 - snake_case throughout, no abbreviations that aren't already domain-standard (`iban` would be fine; `acct_no` would not).
@@ -57,6 +84,13 @@ tables directly in gold.
   `dim_account`): `valid_from` (date, inclusive), `valid_to` (date,
   exclusive; `9999-12-31` while open), `is_current` (boolean), `row_hash`
   (sha2-256 hex of the tracked attributes, for change detection).
+- Data Vault hash columns, in the `vault` schema: `<entity>_hk` (a
+  `sha2`-256 hex of the trimmed business key — the hub/link surrogate),
+  `hash_diff` (a `sha2`-256 hex of a satellite's tracked attributes, for
+  change detection), `load_date` (timestamp the row was inserted),
+  `record_source` (the `bronze.<table>` a row came from). Hash keys are
+  never exposed as source identifiers; the source UUID stays alongside in
+  the hub.
 
 **IAM principals** ([iam/access.yaml](../iam/access.yaml))
 - `<role>@chip-lakehouse.local` - e.g. `data-engineer@chip-lakehouse.local`, `data-analyst@chip-lakehouse.local`. Role-shaped, not person-shaped; a real deployment would map SSO identities to these roles rather than creating one UC user per role.
@@ -160,3 +194,10 @@ monthly-snapshot `closing_balance` both tie to `account_summary.balance`),
 fact-to-dimension FK integrity, and SCD2 range integrity. Prints
 `PASS` / `FAIL` per check and exits non-zero on any failure. Run it after
 `gold_star.py`.
+
+The tier-4 script also reconciles the `vault` raw layer to `silver`:
+it reconstructs each current-state entity from `hub ⨝ current_sat(sat)`,
+recomputes the columns `silver` derives (`age_band`,
+`account_number_masked`), and asserts row counts and every other value
+match `silver` — so the Data Vault is a provable loss-free rebuild point,
+not just an additional copy.

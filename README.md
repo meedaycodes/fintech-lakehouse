@@ -3,7 +3,7 @@
 A local fintech data lakehouse: Spark + Delta Lake for storage/compute, Unity
 Catalog (OSS, self-hosted via Docker) for the catalog and access control,
 following a bronze/silver/gold medallion layout plus an `ml` schema for
-model-ready features.
+model-ready features, plus a parallel `vault` Data Vault raw layer.
 
 ## Architecture
 
@@ -12,7 +12,9 @@ model-ready features.
   Docker, fronted by Spark's `UCSingleCatalog` connector
 - **Schemas**: `bronze` (raw ingest) → `silver` (cleaned/conformed) → `gold`
   (business-level marts), including a conformed Kimball star (`dim_*` / `fct_*`)
-  → `ml` (features/model inputs)
+  → `ml` (features/model inputs). `vault` holds an insert-only Data Vault 2.0
+  raw layer (`hub_*` / `link_*` / `sat_*`) built as a parallel branch off
+  `bronze`.
 - **Access control**: declarative, in [iam/access.yaml](iam/access.yaml),
   applied via [src/manage_access.py](src/manage_access.py)
 
@@ -69,8 +71,14 @@ python3 src/bronze_ingest.py          # raw -> bronze
 python3 src/silver_transform.py       # bronze -> silver (cleaned, normalized)
 python3 src/gold_marts.py             # silver -> gold wide marts
 python3 src/gold_star.py              # silver -> gold Kimball star (dim_*/fct_*)
+python3 src/vault_load.py             # bronze -> vault Data Vault (hub_*/link_*/sat_*)
 python3 tests/verify_e2e.py           # cross-layer invariant checks
 ```
+
+`vault_load.py` is a parallel branch off `bronze` — it can run any time
+after `bronze_ingest.py`, independent of the silver/gold stages. Its
+tables persist across runs (insert-only); a re-run on unchanged `bronze`
+appends nothing.
 
 `gold_marts.py` and `gold_star.py` are independent and can run in either
 order. `gold_star.py`'s `dim_customer` / `dim_account` persist across
