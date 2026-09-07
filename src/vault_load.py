@@ -154,7 +154,7 @@ SATS = [
 ]
 
 
-def _write(spark, token, delta: DataFrame, name: str, first_load: bool) -> int:
+def _write(spark, token, delta: DataFrame, name: str, first_load: bool) -> None:
     n = delta.count()
     if first_load:
         write_delta_table(token, delta, "vault", name, mode="overwrite")
@@ -162,7 +162,6 @@ def _write(spark, token, delta: DataFrame, name: str, first_load: bool) -> int:
         write_delta_table(token, delta, "vault", name, mode="append")
     total = spark.table(f"{CATALOG_NAME}.vault.{name}").count()
     print(f"vault.{name}: +{n} rows ({total} total)")
-    return n
 
 
 if __name__ == "__main__":

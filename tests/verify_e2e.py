@@ -2,7 +2,7 @@
 
 Testing tier 4 (see docs/standard.md): cross-layer invariants no
 catalog-free unit test can cover - row-count conservation, cross-mart
-balance agreement, Kimball star reconciliation, SCD2 integrity.
+balance agreement, Kimball star reconciliation, SCD2 integrity, and Data Vault raw-layer reconciliation.
 
 Requires the Docker Unity Catalog stack up and a full pipeline run:
     cd docker && docker compose up -d
@@ -10,6 +10,7 @@ Requires the Docker Unity Catalog stack up and a full pipeline run:
     python3 src/silver_transform.py
     python3 src/gold_marts.py
     python3 src/gold_star.py
+    python3 src/vault_load.py
     python3 tests/verify_e2e.py
 """
 import sys
@@ -266,6 +267,8 @@ def vault_checks(spark):
 
     # users: age_band recomputed from date_of_birth with transform_users' formula
     su = current_sat(_t(spark, "vault", "sat_user_details"), "user_hk").join(hub_user, "user_hk", "inner")
+    # NOTE: recomputed with today's date - assumes silver_transform.py and this
+    # script run in the same session (silver freezes age_band; the vault keeps only date_of_birth).
     age_years = F.floor(F.datediff(F.current_date(), F.col("date_of_birth")) / 365.25)
     band_start = (F.floor(age_years / 10) * 10).cast("int")
     su = su.select(
