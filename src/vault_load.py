@@ -80,3 +80,34 @@ def new_rows_by_key(
     if existing is None:
         return incoming
     return incoming.join(existing.select(key_col), key_col, "left_anti")
+
+
+def _latest_by_load_date(df: DataFrame, key_col: str) -> DataFrame:
+    w = Window.partitionBy(key_col).orderBy(
+        F.col("load_date").desc(), F.col("hash_diff").desc()
+    )
+    return df.withColumn("_rn", F.row_number().over(w)).where(F.col("_rn") == 1).drop("_rn")
+
+
+def changed_sat_rows(
+    incoming: DataFrame, existing: "DataFrame | None", key_col: str
+) -> DataFrame:
+    """Rows of incoming (one per key_col) whose hash_diff differs from that
+    key's latest hash_diff in existing, plus keys absent from existing.
+    """
+    incoming = incoming.dropDuplicates([key_col])
+    if existing is None:
+        return incoming
+    latest = _latest_by_load_date(existing, key_col).select(
+        key_col, F.col("hash_diff").alias("_cur_hd")
+    )
+    return (
+        incoming.join(latest, key_col, "left")
+        .where(F.col("_cur_hd").isNull() | (F.col("hash_diff") != F.col("_cur_hd")))
+        .drop("_cur_hd")
+    )
+
+
+def current_sat(sat: DataFrame, key_col: str) -> DataFrame:
+    """One row per key_col - the greatest load_date (ties broken by hash_diff)."""
+    return _latest_by_load_date(sat, key_col)

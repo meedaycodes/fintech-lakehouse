@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from pyspark.sql import Row
@@ -20,7 +20,7 @@ from silver_transform import (
     transform_accounts,
     transform_transactions,
 )
-from vault_load import add_hash_diff, add_hash_key, _hash, new_rows_by_key
+from vault_load import add_hash_diff, add_hash_key, _hash, new_rows_by_key, changed_sat_rows, current_sat
 
 
 def test_build_account_types_has_expected_rows(spark):
@@ -526,3 +526,54 @@ def test_new_rows_by_key_all_seen_is_empty(spark):
     incoming = spark.createDataFrame([("hk1", "u1")], ["user_hk", "user_id"])
     existing = spark.createDataFrame([("hk1",)], ["user_hk"])
     assert new_rows_by_key(incoming, existing, "user_hk").count() == 0
+
+
+def _sat_in(spark, rows):
+    # rows: list of (hk, load_date: datetime, hash_diff, attr)
+    return spark.createDataFrame(
+        rows, ["user_hk", "load_date", "hash_diff", "attr"]
+    )
+
+
+def test_changed_sat_rows_first_load_returns_all(spark):
+    incoming = _sat_in(spark, [
+        ("hk1", datetime(2026, 1, 1), "d1", "a"),
+        ("hk2", datetime(2026, 1, 1), "d2", "b"),
+    ])
+    out = changed_sat_rows(incoming, None, "user_hk")
+    assert sorted(r["user_hk"] for r in out.collect()) == ["hk1", "hk2"]
+
+
+def test_changed_sat_rows_unchanged_is_noop(spark):
+    existing = _sat_in(spark, [("hk1", datetime(2026, 1, 1), "d1", "a")])
+    incoming = _sat_in(spark, [("hk1", datetime(2026, 2, 1), "d1", "a")])
+    assert changed_sat_rows(incoming, existing, "user_hk").count() == 0
+
+
+def test_changed_sat_rows_changed_attribute_returns_row(spark):
+    existing = _sat_in(spark, [("hk1", datetime(2026, 1, 1), "d1", "a")])
+    incoming = _sat_in(spark, [("hk1", datetime(2026, 2, 1), "d2", "b")])
+    out = changed_sat_rows(incoming, existing, "user_hk").collect()
+    assert len(out) == 1 and out[0]["hash_diff"] == "d2"
+
+
+def test_changed_sat_rows_compares_against_latest_existing_version(spark):
+    # hk1 history: d1 then d2. Incoming d1 again = a real change from the
+    # current (d2) state, so it must come through.
+    existing = _sat_in(spark, [
+        ("hk1", datetime(2026, 1, 1), "d1", "a"),
+        ("hk1", datetime(2026, 2, 1), "d2", "b"),
+    ])
+    incoming = _sat_in(spark, [("hk1", datetime(2026, 3, 1), "d1", "a")])
+    out = changed_sat_rows(incoming, existing, "user_hk").collect()
+    assert len(out) == 1 and out[0]["hash_diff"] == "d1"
+
+
+def test_current_sat_picks_greatest_load_date(spark):
+    sat = _sat_in(spark, [
+        ("hk1", datetime(2026, 1, 1), "d1", "a"),
+        ("hk1", datetime(2026, 2, 1), "d2", "b"),
+        ("hk2", datetime(2026, 1, 1), "d9", "z"),
+    ])
+    rows = {r["user_hk"]: r["hash_diff"] for r in current_sat(sat, "user_hk").collect()}
+    assert rows == {"hk1": "d2", "hk2": "d9"}
